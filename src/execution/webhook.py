@@ -1,0 +1,142 @@
+"""Webhook receiver. Verify HMAC signature, dedupe on event id, ack fast,
+process async.
+
+Two SDK behaviors worth flagging up front, verified against the installed
+`razorpay` package rather than assumed (see chat for the check):
+  - razorpay.Utility.verify_webhook_signature(body, signature, secret)
+    requires `body` as a `str`, not `bytes` -- passing raw request bytes
+    raises TypeError, not a clean signature failure. We decode the raw body
+    with .decode("utf-8") before calling it, and verify on the RAW string
+    (never on a re-serialized/parsed-then-dumped body, which is not
+    guaranteed byte-identical and would break the signature).
+  - It raises SignatureVerificationError on mismatch rather than returning
+    False. verify_signature() below catches that and returns bool.
+
+The exact webhook JSON envelope (event name, payload.payment_link.entity
+field names) is built against Razorpay's documented shape but has NOT been
+verified against a live webhook from this session -- see
+docs/manual_webhook_verification.md. Treat a real captured payload as the
+source of truth over what's assumed here.
+"""
+
+import json
+from datetime import datetime
+from typing import Optional
+
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from sqlalchemy import DateTime, String
+from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import sessionmaker
+
+from .db import Base
+from .eventlog import append_event
+from .states import AbandonReason, PaymentState
+
+
+class SeenWebhookEvent(Base):
+    __tablename__ = "seen_webhook_events"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+def verify_signature(raw_body: bytes, signature: str, secret: str) -> bool:
+    import razorpay
+
+    utility = razorpay.Utility()
+    try:
+        return utility.verify_webhook_signature(raw_body.decode("utf-8"), signature, secret)
+    except razorpay.errors.SignatureVerificationError:
+        return False
+
+
+def is_duplicate_event(session: Session, event_id: str) -> bool:
+    return session.get(SeenWebhookEvent, event_id) is not None
+
+
+def mark_event_seen(session: Session, event_id: str, now: datetime) -> None:
+    session.add(SeenWebhookEvent(event_id=event_id, received_at=now))
+    session.commit()
+
+
+def _payment_id_from_reference_id(reference_id: str) -> str:
+    # idempotency.make_idempotency_key() format: "{payment_id}:attempt:{n}"
+    return reference_id.split(":attempt:")[0]
+
+
+def process_webhook_event(session: Session, payload: dict, now: datetime) -> Optional[str]:
+    """Applies the AWAITING_CONFIRMATION -> {RECOVERED, ABANDONED} transition
+    for the payment this event refers to. Returns the payment_id acted on,
+    or None if the event isn't one we act on.
+
+    Assumed envelope (unverified against a live webhook -- see module
+    docstring): {"event": "payment_link.paid" | "payment_link.expired" | ...,
+    "payload": {"payment_link": {"entity": {"reference_id": ...}}}}
+    """
+    event = payload.get("event")
+    entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+    reference_id = entity.get("reference_id")
+    if not reference_id:
+        return None
+
+    payment_id = _payment_id_from_reference_id(reference_id)
+
+    if event == "payment_link.paid":
+        append_event(session, payment_id, PaymentState.RECOVERED, now, payload=entity)
+        session.commit()
+        return payment_id
+
+    if event in ("payment_link.expired", "payment_link.cancelled"):
+        append_event(
+            session,
+            payment_id,
+            PaymentState.ABANDONED,
+            now,
+            abandon_reason=AbandonReason.PAYMENT_FAILED,
+            payload=entity,
+        )
+        session.commit()
+        return payment_id
+
+    return None
+
+
+def create_app(session_factory: sessionmaker, webhook_secret: str) -> FastAPI:
+    app = FastAPI()
+
+    @app.post("/webhooks/razorpay")
+    async def receive_webhook(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        x_razorpay_signature: str = Header(default=""),
+    ):
+        raw_body = await request.body()
+
+        if not verify_signature(raw_body, x_razorpay_signature, webhook_secret):
+            raise HTTPException(status_code=400, detail="invalid signature")
+
+        payload = json.loads(raw_body)
+        event_id = payload.get("id") or payload.get("event_id")
+        if not event_id:
+            raise HTTPException(status_code=400, detail="missing event id")
+
+        session = session_factory()
+        try:
+            if is_duplicate_event(session, event_id):
+                return {"status": "ok", "duplicate": True}
+            mark_event_seen(session, event_id, datetime.now())
+        finally:
+            session.close()
+
+        background_tasks.add_task(_process_in_background, session_factory, payload)
+        return {"status": "ok"}
+
+    return app
+
+
+def _process_in_background(session_factory: sessionmaker, payload: dict) -> None:
+    session = session_factory()
+    try:
+        process_webhook_event(session, payload, datetime.now())
+    finally:
+        session.close()
