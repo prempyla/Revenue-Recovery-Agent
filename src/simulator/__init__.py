@@ -16,6 +16,7 @@ from .outages import generate_outage_events, inject_outage_events
 from .contact_tracking import ContactTracker, contact_cost_paise, is_customer_facing
 from .policies import POLICIES
 from .harness import run_eval, run_policy, compute_metrics
+from .outage_detector import OutageDetectorConfig, detect_systemic_event
 
 __all__ = [
     "Action",
@@ -39,4 +40,6 @@ __all__ = [
     "run_eval",
     "run_policy",
     "compute_metrics",
+    "OutageDetectorConfig",
+    "detect_systemic_event",
 ]

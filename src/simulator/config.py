@@ -18,6 +18,19 @@ LIMIT_EXCEEDED_COOLDOWN_HOURS = 4  # ASSUMPTION — spec says "few hours"
 # --- Contact cost (§5) ---
 COST_PER_CONTACT_PAISE = 200  # spec-given example value (Rs 2)
 
+# --- Systemic outage detector ---
+# 2026-08-25 (DECISIONS.md): count_threshold is deliberately NOT set here.
+# Empirically (see tests/test_outage_detector.py), a literal "5x background
+# rate" comes out to ~0.03-0.06 events/window for every issuer on the real
+# batch — sub-1, i.e. any single failure "exceeds" it. Practical integer
+# thresholds (2, 3, 5) all false-positive on the decoy cluster; 6-7 discriminate
+# on this specific batch, but only because the true outage's random peak (8)
+# narrowly beat the decoy's peak (6) — a fragile margin, not a robust one, and
+# still an hour-plus detection lag. No single good threshold exists yet with
+# count-only detection at these cluster sizes; not baking in a wrong answer.
+DETECTOR_WINDOW_MINUTES = 15  # spec-given starting point
+DETECTOR_COOLDOWN_MINUTES = 15  # ASSUMPTION — ungiven; matched to window_minutes as a starting point
+
 # --- Compliance (eval spec §2 hard invariants) ---
 # 2026-08-25 (DECISIONS.md): a policy-level compliance rule, separate from
 # Customer.annoyance_threshold (a hidden, per-persona lifetime-patience cap
