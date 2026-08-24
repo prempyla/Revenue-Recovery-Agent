@@ -18,6 +18,13 @@ LIMIT_EXCEEDED_COOLDOWN_HOURS = 4  # ASSUMPTION — spec says "few hours"
 # --- Contact cost (§5) ---
 COST_PER_CONTACT_PAISE = 200  # spec-given example value (Rs 2)
 
+# --- Compliance (eval spec §2 hard invariants) ---
+# 2026-08-25 (DECISIONS.md): a policy-level compliance rule, separate from
+# Customer.annoyance_threshold (a hidden, per-persona lifetime-patience cap
+# used by ground truth). MAX_WEEKLY_CONTACTS is a rate limit any policy must
+# respect, checked against the action log — not part of the persona schema.
+MAX_WEEKLY_CONTACTS = 3
+
 # --- Payment generation ---
 # ASSUMPTION: decline_reason category weights. Spec only specifies ordering
 # (INSUFFICIENT_FUNDS and ISSUER_DOWN heaviest, terminal codes lightest).

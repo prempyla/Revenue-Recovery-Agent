@@ -13,12 +13,14 @@ rather than crashing the run — see run_policy() and run_eval().
 """
 
 import statistics
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
+from . import config
 from .contact_tracking import ContactTracker, contact_cost_paise, is_customer_facing
 from .ground_truth import success_probability
 from .policies import POLICIES, Plan
@@ -182,6 +184,30 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
             after_opt_out_count += 1
         contact_counts[customer.customer_id] = count_before + 1
 
+    # Rolling weekly contact cap: for each customer, and each customer-facing
+    # action to them, count how many customer-facing actions to that same
+    # customer fall within the trailing 7 days up to and including this one.
+    # A violation is any action where that count exceeds MAX_WEEKLY_CONTACTS
+    # — a rate limit (config.py) distinct from the hidden annoyance_threshold.
+    times_by_customer: Dict[str, List[datetime]] = defaultdict(list)
+    for e in log_entries:
+        if not e.is_customer_facing:
+            continue
+        customer_id = payments_by_id[e.payment_id].customer_id
+        times_by_customer[customer_id].append(e.action_time)
+
+    weekly_cap_violation_count = 0
+    window = timedelta(days=7)
+    for times in times_by_customer.values():
+        times.sort()
+        left = 0
+        for right in range(len(times)):
+            while times[right] - times[left] > window:
+                left += 1
+            count_in_window = right - left + 1
+            if count_in_window > config.MAX_WEEKLY_CONTACTS:
+                weekly_cap_violation_count += 1
+
     return {
         "zero_double_charges": double_charges == 0,
         "double_charge_count": double_charges,
@@ -189,11 +215,8 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
         "contacts_outside_allowed_hours_count": outside_hours_count,
         "zero_contacts_after_opt_out": after_opt_out_count == 0,
         "contacts_after_opt_out_count": after_opt_out_count,
-        # Schema §1 defines annoyance_threshold (a total-contact cap) but no
-        # separate per-week cap field, so there's nothing to check this
-        # invariant against yet — reported explicitly rather than guessing
-        # a number the schema never specified.
-        "weekly_contact_cap": "not_applicable: schema defines no weekly-cap field",
+        "zero_weekly_cap_violations": weekly_cap_violation_count == 0,
+        "weekly_cap_violation_count": weekly_cap_violation_count,
     }
 
 

@@ -45,3 +45,6 @@ At 20 minutes, naive_fixed_retry's first attempt (fail_time + 1hr) always lands 
 
 **2026-08-25 — naive_fixed_retry's retries are customer-facing, not silent**
 Its 3 fixed attempts each send a customer-facing notification, unlike a taxonomy-aware silent backend retry. Tradeoff: this is what makes contact_count (and therefore ₹/contact) actually differentiate naive from a real policy — a silent naive baseline would win on ₹/contact by construction, which would defeat the point of the primary metric.
+
+**2026-08-25 — MAX_WEEKLY_CONTACTS is a policy-level compliance rule, not a persona attribute**
+Added as a global config constant (starts at 3), separate from `Customer.annoyance_threshold`. annoyance_threshold is hidden ground truth — a per-persona lifetime-patience cap the simulator uses to decide when a customer stops being recoverable at all. MAX_WEEKLY_CONTACTS is the opposite: a rate limit any real policy has to actively respect, checked against the action log after the fact, same as the hours/opt-out invariants. Keeping the two separate means the eval harness can score a policy's compliance discipline independently of whatever the ground-truth persona happens to tolerate.
