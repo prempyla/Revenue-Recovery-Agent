@@ -89,7 +89,12 @@ FUNDS_ARRIVAL_EARLY_RANGE = (1, 3)
 FUNDS_ARRIVAL_LATE_RANGE = (25, 30)
 
 # --- Outage + decoy injection (§3) ---
-TRUE_OUTAGE_DURATION_MINUTES = 20  # spec-given
+# 2026-08-25 (DECISIONS.md): bumped from the schema's literal 20 to 90. At 20
+# minutes, naive_fixed_retry's first attempt (+1hr) always lands after the
+# outage has already cleared, so naive never gets caught by it and the
+# outage-ablation comparison has nothing to demonstrate. 90 min overlaps
+# naive's first retry while still clearing before its second.
+TRUE_OUTAGE_DURATION_MINUTES = 90
 # ASSUMPTION: decoy duration. Spec gives 20 min for the true outage but leaves
 # the decoy's duration unspecified beyond "smaller ... burst".
 DECOY_CLUSTER_DURATION_MINUTES = 15

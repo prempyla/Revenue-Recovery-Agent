@@ -16,6 +16,8 @@ from .types import Action, CUSTOMER_FACING_ACTION_TYPES
 
 
 def is_customer_facing(action: Action) -> bool:
+    if action.customer_facing is not None:
+        return action.customer_facing
     return action.action_type in CUSTOMER_FACING_ACTION_TYPES
 
 

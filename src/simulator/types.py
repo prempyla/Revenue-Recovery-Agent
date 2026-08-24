@@ -114,7 +114,17 @@ class Action:
     None for silent/retry/stop actions. Per §6, this is the same value the
     §6 log entry persists as `channel` (`none` there for the None case here) —
     the ground-truth input and the audit record are one value, not two.
+
+    `customer_facing` overrides the default CUSTOMER_FACING_ACTION_TYPES
+    classification for this specific action instance. Schema §5's own phrasing
+    ("a backend retry the customer never sees, e.g. retry_now with no message
+    sent") is an example, not an absolute rule — whether a retry counts as a
+    contact depends on whether a message went with it. Leave None to use the
+    action_type default; set explicitly (e.g. naive_fixed_retry's retries,
+    which do send a notification) to override it. See is_customer_facing() in
+    contact_tracking.py.
     """
 
     action_type: ActionType
     channel: Optional[Channel] = None
+    customer_facing: Optional[bool] = None

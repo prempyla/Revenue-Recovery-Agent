@@ -44,7 +44,7 @@ Two entries only.
 |---|---|---|
 | `issuer_code` | string | pick one issuer with reasonable payment volume |
 | `start_time` | timestamp | mid-window, not day 1 or day 30 |
-| `duration_minutes` | int | 20 for the true outage |
+| `duration_minutes` | int | 90 for the true outage (raised from an initial 20 — see DECISIONS.md 2026-08-25: at 20 min, naive_fixed_retry's first attempt at +1hr always lands after the outage clears, so the outage-ablation comparison has nothing to demonstrate) |
 | `kind` | enum [true_outage, decoy_cluster] | one of each, different issuers, different times |
 
 During a `true_outage` window: any payment attempt against that issuer is forced to `ISSUER_DOWN`, near-100%. Recovery probability returns to baseline shortly after the window closes (see §4).

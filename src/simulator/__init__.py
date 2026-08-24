@@ -14,6 +14,8 @@ from .payments import generate_payments
 from .ground_truth import success_probability
 from .outages import generate_outage_events, inject_outage_events
 from .contact_tracking import ContactTracker, contact_cost_paise, is_customer_facing
+from .policies import POLICIES
+from .harness import run_eval, run_policy, compute_metrics
 
 __all__ = [
     "Action",
@@ -33,4 +35,8 @@ __all__ = [
     "ContactTracker",
     "contact_cost_paise",
     "is_customer_facing",
+    "POLICIES",
+    "run_eval",
+    "run_policy",
+    "compute_metrics",
 ]

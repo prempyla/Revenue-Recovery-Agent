@@ -39,3 +39,9 @@ No KYC or live activation needed for the buildathon scope, and it removes any ch
 
 **2026-08-25 — Action channel added to the log schema, missing from initial spec**
 Claude Code caught that the eval spec's §4 formulas need a channel to compute success probability, but §6's persisted log entry didn't include one. Fixed: channel is now part of the audit record itself, not just an internal calculation input — an audit trail that doesn't say *how* a customer was contacted is incomplete. Also fixed: decline_reason is now explicitly mapped per instrument_type rather than left to inference.
+
+**2026-08-25 — True outage duration raised from 20 to 90 minutes**
+At 20 minutes, naive_fixed_retry's first attempt (fail_time + 1hr) always lands after the outage has already cleared — the baseline never actually gets caught by it, so the outage-ablation demo has nothing to show. 90 minutes overlaps naive's first retry attempt while still clearing before its second (+2hr). Decoy cluster duration is unaffected — it only needs to look like a burst for the false-positive-rate measurement, not overlap any baseline's retry schedule.
+
+**2026-08-25 — naive_fixed_retry's retries are customer-facing, not silent**
+Its 3 fixed attempts each send a customer-facing notification, unlike a taxonomy-aware silent backend retry. Tradeoff: this is what makes contact_count (and therefore ₹/contact) actually differentiate naive from a real policy — a silent naive baseline would win on ₹/contact by construction, which would defeat the point of the primary metric.
