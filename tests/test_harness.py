@@ -31,11 +31,80 @@ def _sample_batch(seed=1):
     return customers, payments, events
 
 
-def test_full_agent_reports_not_implemented_without_crashing():
+def test_full_agent_and_ablations_are_implemented_and_run_without_crashing():
     customers, payments, events = _sample_batch()
     results = run_eval(payments, customers, events, seed=1)
-    assert results["full_agent"]["implemented"] is False
-    assert "error" in results["full_agent"]
+    for name in ("full_agent", "full_agent_minus_outage_detection", "full_agent_minus_llm"):
+        assert results[name]["implemented"] is True, name
+
+
+def test_full_agent_never_violates_hard_compliance_invariants_on_any_seed():
+    """decide()'s vetoes (contact hours, weekly cap/opt-out proxy) run
+    BEFORE scoring -- confirms that holds up as zero violations in the
+    harness's own post-hoc audit, across seeds, not just by construction."""
+    for seed in (42, 7, 123):
+        customers = generate_customers(300, seed=seed)
+        payments = generate_payments(customers, 450, window_start=WINDOW_START, window_days=30, seed=seed)
+        events = generate_outage_events(window_start=WINDOW_START, window_days=30, seed=seed)
+        payments = inject_outage_events(payments, customers, events, seed=seed)
+
+        results = run_eval(payments, customers, events, seed=7)
+        invariants = results["full_agent"]["invariants"]
+        assert invariants["zero_contacts_outside_allowed_hours"] is True, seed
+        assert invariants["zero_weekly_cap_violations"] is True, seed
+        assert invariants["zero_double_charges"] is True, seed
+
+
+def test_full_agent_beats_rules_only_on_rupees_per_contact_on_all_seeds():
+    """Eval spec §4 falsification check: if rules_only >= full_agent on
+    Rs/contact, the decision-policy layer adds nothing over static taxonomy
+    routing. Must hold across seeds, not just one."""
+    for seed in (42, 7, 123):
+        customers = generate_customers(300, seed=seed)
+        payments = generate_payments(customers, 450, window_start=WINDOW_START, window_days=30, seed=seed)
+        events = generate_outage_events(window_start=WINDOW_START, window_days=30, seed=seed)
+        payments = inject_outage_events(payments, customers, events, seed=seed)
+
+        results = run_eval(payments, customers, events, seed=7)
+        assert (
+            results["full_agent"]["primary_rupees_per_contact"]
+            > results["rules_only"]["primary_rupees_per_contact"]
+        ), seed
+
+
+def test_outage_detection_ablation_measurably_differs_from_full_agent_on_all_seeds():
+    """Regression guard: an earlier version of full_agent's hold duration
+    (60min: detector window+cooldown+30) wasn't long enough to clear a
+    90-minute true_outage for payments failing near its onset, so on 2 of 3
+    seeds the ablation showed ZERO measurable difference from full_agent --
+    not because outage detection didn't matter, but because both the held
+    and un-held retry times landed inside the same still-live outage
+    window. Fixed via ASSUMED_MAX_OUTAGE_DURATION_MINUTES (full_agent.py).
+    This must keep holding across seeds, not just one."""
+    for seed in (42, 7, 123):
+        customers = generate_customers(300, seed=seed)
+        payments = generate_payments(customers, 450, window_start=WINDOW_START, window_days=30, seed=seed)
+        events = generate_outage_events(window_start=WINDOW_START, window_days=30, seed=seed)
+        payments = inject_outage_events(payments, customers, events, seed=seed)
+
+        results = run_eval(payments, customers, events, seed=7)
+        full_agent = results["full_agent"]
+        ablation = results["full_agent_minus_outage_detection"]
+
+        assert full_agent["total_recovered_rupees"] > ablation["total_recovered_rupees"], seed
+
+
+def test_full_agent_minus_llm_is_identical_to_full_agent_with_a_note():
+    """No LLM layer exists yet -- eval spec §3's minus-LLM ablation is
+    trivially the same result this round, and says so rather than faking a
+    separate measurement."""
+    customers, payments, events = _sample_batch()
+    results = run_eval(payments, customers, events, seed=1)
+    full_agent = results["full_agent"]
+    minus_llm = results["full_agent_minus_llm"]
+    assert minus_llm["primary_rupees_per_contact"] == full_agent["primary_rupees_per_contact"]
+    assert minus_llm["total_recovered_rupees"] == full_agent["total_recovered_rupees"]
+    assert "note" in minus_llm and "no LLM layer" in minus_llm["note"]
 
 
 def test_three_baselines_are_implemented_and_produce_metrics():

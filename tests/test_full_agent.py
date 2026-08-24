@@ -1,0 +1,160 @@
+"""Isolation tests for full_agent's decide() -- compliance vetoes fire
+BEFORE scoring, the systemic detector changes ISSUER_DOWN's decision, and
+STOP is genuinely reachable, not a fallback bolted on afterward."""
+
+from datetime import datetime, timedelta
+
+from simulator import ContactTracker, DeclineReason, InstrumentType, Language
+from simulator.full_agent import decide
+from simulator.outage_detector import OutageDetectorConfig
+from simulator.types import ActionType, Customer, OutageEvent, Payment
+
+WINDOW_START = datetime(2026, 1, 1)
+
+
+def _persona(**overrides):
+    base = dict(
+        customer_id="cust_x",
+        recovery_propensity=0.6,
+        funds_arrival_day=2,
+        contact_hours=(9, 21),
+        annoyance_threshold=10,
+        channel_response_rate={"upi_link": 0.7, "whatsapp": 0.6, "sms": 0.5},
+        preferred_language=Language.EN,
+    )
+    base.update(overrides)
+    return Customer(**base)
+
+
+# 10am -- comfortably inside the default (9, 21) contact_hours even after a
+# candidate's typical offset (up to a few hours) is added.
+DEFAULT_FAILED_AT = datetime(2026, 1, 1, 10, 0)
+
+
+def _payment(decline_reason, issuer_code="HDFC", failed_at=DEFAULT_FAILED_AT, amount_paise=500_000):
+    return Payment(
+        payment_id="pay_x",
+        customer_id="cust_x",
+        amount_paise=amount_paise,
+        instrument_type=InstrumentType.CARD,
+        decline_reason=decline_reason,
+        issuer_code=issuer_code,
+        failed_at=failed_at,
+    )
+
+
+def test_insufficient_funds_picks_send_payment_link():
+    decision = decide(
+        _payment(DeclineReason.INSUFFICIENT_FUNDS), _persona(), WINDOW_START, ContactTracker(), [], []
+    )
+    assert decision is not None
+    offset, action = decision
+    assert action.action_type == ActionType.SEND_PAYMENT_LINK
+
+
+def test_mandate_revoked_has_no_candidates_stop_wins():
+    decision = decide(
+        _payment(DeclineReason.MANDATE_REVOKED), _persona(), WINDOW_START, ContactTracker(), [], []
+    )
+    assert decision is None
+
+
+def test_contact_hours_veto_forces_stop_even_though_action_would_otherwise_score_positive():
+    """A compliance rule that can be outscored isn't a compliance rule: a
+    huge payment amount must NOT buy its way past the contact-hours veto."""
+    persona = _persona(contact_hours=(9, 10))  # a narrow window
+    # AFA_3DS_DROPOFF's candidate fires at +30min; failed_at at midnight
+    # puts the action_time well outside (9,10).
+    payment = _payment(DeclineReason.AFA_3DS_DROPOFF, amount_paise=5_000_000)  # huge amount
+    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    assert decision is None  # vetoed, not scored around
+
+
+def test_weekly_cap_veto_stops_further_customer_facing_contact():
+    from simulator import config
+
+    persona = _persona()
+    tracker = ContactTracker()
+    for _ in range(config.MAX_WEEKLY_CONTACTS):
+        tracker._counts[persona.customer_id] = tracker.contact_count(persona.customer_id) + 1
+
+    payment = _payment(DeclineReason.AFA_3DS_DROPOFF)  # customer-facing (send_nudge)
+    decision = decide(payment, persona, WINDOW_START, tracker, [], [])
+    assert decision is None
+
+
+def test_silent_action_is_not_subject_to_contact_hours_or_weekly_cap():
+    from simulator import config
+
+    persona = _persona(contact_hours=(9, 10))  # narrow window
+    tracker = ContactTracker()
+    for _ in range(config.MAX_WEEKLY_CONTACTS + 5):
+        tracker._counts[persona.customer_id] = tracker.contact_count(persona.customer_id) + 1
+
+    # NETWORK_TIMEOUT -> retry_now, a silent action -- unaffected by either veto.
+    payment = _payment(DeclineReason.NETWORK_TIMEOUT)
+    decision = decide(payment, persona, WINDOW_START, tracker, [], [])
+    assert decision is not None
+    assert decision[1].action_type == ActionType.RETRY_NOW
+
+
+def test_issuer_down_holds_when_outage_detected_instead_of_retrying_into_it():
+    persona = _persona()
+    payment = _payment(DeclineReason.ISSUER_DOWN, issuer_code="HDFC")
+    detector_cfg = OutageDetectorConfig(window_minutes=15, count_threshold=3, cooldown_minutes=15)
+
+    # A dense burst on the same issuer, landing inside the trailing 15-min
+    # window ending at the +20min prospective retry time (i.e. within
+    # (20-15, 20] = (5, 20] minutes after failure) -- enough to exceed
+    # count_threshold=3. Anchored to the PAYMENT's own failed_at, not the
+    # unrelated module-level WINDOW_START.
+    burst = [
+        Payment(
+            payment_id=f"pay_burst_{i}",
+            customer_id="cust_other",
+            amount_paise=100_000,
+            instrument_type=InstrumentType.CARD,
+            decline_reason=DeclineReason.ISSUER_DOWN,
+            issuer_code="HDFC",
+            failed_at=payment.failed_at + timedelta(minutes=m),
+        )
+        for i, m in enumerate([10, 12, 14, 16, 18])
+    ]
+
+    with_detection = decide(
+        payment, persona, WINDOW_START, ContactTracker(), burst, [], detector_config=detector_cfg,
+        disable_outage_detection=False,
+    )
+    ablated = decide(
+        payment, persona, WINDOW_START, ContactTracker(), burst, [], detector_config=detector_cfg,
+        disable_outage_detection=True,
+    )
+
+    assert with_detection is not None and ablated is not None
+    detected_offset, _ = with_detection
+    ablated_offset, _ = ablated
+    # Outage detected -> holds for a much longer offset than the ablation,
+    # which always uses the naive ~20min retry regardless of the burst.
+    assert detected_offset > ablated_offset
+    assert ablated_offset == timedelta(minutes=20)
+
+
+def test_issuer_down_no_outage_detected_uses_the_short_retry_offset():
+    persona = _persona()
+    payment = _payment(DeclineReason.ISSUER_DOWN, issuer_code="HDFC")
+    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    assert decision is not None
+    offset, action = decision
+    assert offset == timedelta(minutes=20)
+    assert action.action_type == ActionType.RETRY_SCHEDULED
+
+
+def test_tiny_payment_amount_can_make_stop_win_over_a_customer_facing_action():
+    """expected_value = rate * amount - cost; when amount is small enough
+    that cost dominates, STOP (score 0) beats every real candidate."""
+    persona = _persona()
+    # AFA_3DS_DROPOFF customer-facing rate 0.40; at amount_paise=1 the
+    # expected value is ~0.4 - 200 << 0, well under STOP's 0.
+    payment = _payment(DeclineReason.AFA_3DS_DROPOFF, amount_paise=1)
+    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    assert decision is None

@@ -125,15 +125,14 @@ def rules_only_policy(payment: Payment, customer: Customer) -> Plan:
     return [(offset, Action(action_type, channel=channel))]
 
 
-def full_agent_policy(payment: Payment, customer: Customer) -> Plan:
-    """Not built this round — taxonomy + outage detection + cost-aware policy
-    + LLM messaging layer per eval spec §3."""
-    raise NotImplementedError("full_agent policy is not implemented yet")
-
-
+# full_agent lives in full_agent.py, not here: it needs batch-level context
+# (the failure log for the systemic detector, a shared ContactTracker for
+# compliance vetoes) that the plain (payment, customer) -> Plan signature
+# above can't carry. See harness.run_eval for how it's constructed and run
+# alongside these three. Deliberately not in POLICIES below — it isn't
+# constructable from a payment/customer pair alone.
 POLICIES = {
     "do_nothing": do_nothing_policy,
     "naive_fixed_retry": naive_fixed_retry_policy,
     "rules_only": rules_only_policy,
-    "full_agent": full_agent_policy,
 }

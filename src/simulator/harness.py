@@ -66,23 +66,34 @@ def _reason_for(policy_name: str, payment: Payment, attempt_index: int, plan_len
         return f"fixed retry attempt {attempt_index + 1}/{plan_len}, no taxonomy lookup"
     if policy_name == "rules_only":
         return f"taxonomy routing for {payment.decline_reason.value}"
+    if policy_name.startswith("full_agent"):
+        return f"cost-aware decision for {payment.decline_reason.value} ({policy_name})"
     return f"{policy_name} action {attempt_index + 1}/{plan_len}"
 
 
 def run_policy(
     policy_name: str,
-    policy_fn,
+    policy_fn_or_factory,
     payments: Sequence[Payment],
     customers_by_id: Dict[str, Customer],
     outage_events: Sequence[OutageEvent],
     seed: int,
+    is_factory: bool = False,
 ) -> RunResult:
     """Run one policy across a batch of payments. Each policy gets its own
     ContactTracker and RNG stream — same underlying ground-truth batch, but
     an independent simulated run per policy, per eval spec §3 ("same batch,
-    same ground truth")."""
+    same ground truth").
+
+    is_factory=True means policy_fn_or_factory is a
+    Callable[[ContactTracker], policy_fn] instead of a plain policy_fn —
+    full_agent needs this run's own tracker for its compliance vetoes
+    (weekly cap / opt-out), which none of the other three policies need or
+    get. See simulator.full_agent.make_full_agent_policy.
+    """
     rng = np.random.default_rng(seed)
     tracker = ContactTracker()
+    policy_fn = policy_fn_or_factory(tracker) if is_factory else policy_fn_or_factory
     log_entries: List[LogEntry] = []
     outcomes: List[PaymentOutcome] = []
     log_id_counter = 0
@@ -302,18 +313,98 @@ def compute_metrics(
     }
 
 
+def _systemic_detector_metrics(payments: Sequence[Payment], outage_events: Sequence[OutageEvent]) -> dict:
+    """Detection lag on the true_outage, false-positive status on the
+    decoy — computed once per batch (the detector's behavior doesn't depend
+    on which policy is running), attached only to full_agent's metrics
+    below since it's the only policy that consults the detector at all."""
+    from .outage_detector import OutageDetectorConfig, detect_systemic_event
+
+    detector_cfg = OutageDetectorConfig(
+        window_minutes=config.DETECTOR_WINDOW_MINUTES,
+        count_threshold=config.DETECTOR_COUNT_THRESHOLD,
+        cooldown_minutes=config.DETECTOR_COOLDOWN_MINUTES,
+    )
+
+    def _scan(issuer_code, start, scan_minutes):
+        t = start - timedelta(minutes=10)
+        end = start + timedelta(minutes=scan_minutes)
+        while t <= end:
+            if detect_systemic_event(payments, issuer_code, t, detector_cfg):
+                return t
+            t += timedelta(minutes=1)
+        return None
+
+    detection_lag_minutes = None
+    for event in _true_outage_events(outage_events):
+        first_flag = _scan(event.issuer_code, event.start_time, event.duration_minutes + 60)
+        if first_flag is not None:
+            detection_lag_minutes = (first_flag - event.start_time).total_seconds() / 60
+            break
+
+    false_positive = False
+    for event in outage_events:
+        if event.kind != "decoy_cluster":
+            continue
+        if _scan(event.issuer_code, event.start_time, event.duration_minutes + 30) is not None:
+            false_positive = True
+            break
+
+    return {
+        "systemic_detector_detection_lag": detection_lag_minutes,
+        "systemic_detector_false_positive_rate": 1.0 if false_positive else 0.0,
+    }
+
+
 def run_eval(
     payments: Sequence[Payment],
     customers: Sequence[Customer],
     outage_events: Sequence[OutageEvent],
     seed: int = 0,
     policies: Dict[str, "callable"] = POLICIES,
+    include_full_agent: bool = True,
 ) -> Dict[str, dict]:
     """Run every policy in `policies` over the same batch and return
-    {policy_name: metrics_dict}, per schema §7 step 7."""
+    {policy_name: metrics_dict}, per schema §7 step 7.
+
+    include_full_agent=True also runs full_agent plus the two eval spec §3
+    ablations (minus-outage-detection, minus-LLM) — these need batch-level
+    context (failure_log, outage_events, a shared ContactTracker) the plain
+    POLICIES entries don't, so they're constructed here via
+    full_agent.make_full_agent_policy rather than living in POLICIES.
+    """
     customers_by_id = {c.customer_id: c for c in customers}
     results = {}
     for name, policy_fn in policies.items():
         run_result = run_policy(name, policy_fn, payments, customers_by_id, outage_events, seed)
         results[name] = compute_metrics(run_result, outage_events, customers_by_id)
+
+    if include_full_agent:
+        from .full_agent import make_full_agent_policy
+
+        variants = [
+            ("full_agent", False),
+            ("full_agent_minus_outage_detection", True),
+        ]
+        for variant_name, disable_outage in variants:
+            factory = make_full_agent_policy(payments, outage_events, disable_outage_detection=disable_outage)
+            run_result = run_policy(
+                variant_name, factory, payments, customers_by_id, outage_events, seed, is_factory=True
+            )
+            results[variant_name] = compute_metrics(run_result, outage_events, customers_by_id)
+
+        if results["full_agent"]["implemented"]:
+            results["full_agent"].update(_systemic_detector_metrics(payments, outage_events))
+
+        # No LLM layer exists yet (per eval spec §3, this ablation isolates
+        # its contribution) -- rather than fake a "without LLM" run that
+        # doesn't structurally exist yet, this is explicitly the same result
+        # as full_agent, with a note saying so, not a silently duplicated
+        # number pretending to be a separate measurement.
+        results["full_agent_minus_llm"] = dict(results["full_agent"])
+        results["full_agent_minus_llm"]["policy_name"] = "full_agent_minus_llm"
+        results["full_agent_minus_llm"]["note"] = (
+            "identical to full_agent -- no LLM layer exists yet to remove"
+        )
+
     return results
