@@ -87,3 +87,18 @@ LANGUAGE_WEIGHTS = {"hinglish": 0.5, "hi": 0.3, "en": 0.2}
 FUNDS_ARRIVAL_EARLY_PROBABILITY = 0.6
 FUNDS_ARRIVAL_EARLY_RANGE = (1, 3)
 FUNDS_ARRIVAL_LATE_RANGE = (25, 30)
+
+# --- Outage + decoy injection (§3) ---
+TRUE_OUTAGE_DURATION_MINUTES = 20  # spec-given
+# ASSUMPTION: decoy duration. Spec gives 20 min for the true outage but leaves
+# the decoy's duration unspecified beyond "smaller ... burst".
+DECOY_CLUSTER_DURATION_MINUTES = 15
+# start_time as a fraction of window_days, so both events land mid-window and
+# never at day 1 or day 30, per spec.
+OUTAGE_START_FRACTION_RANGE = (0.25, 0.75)
+# ASSUMPTION: how many extra same-issuer ISSUER_DOWN payments get injected
+# into each window to actually create a detectable cluster (background
+# density alone over a 20-minute slice of a 30-day window would place ~0
+# payments there). Decoy is explicitly "smaller" than the true outage per §3.
+TRUE_OUTAGE_CLUSTER_SIZE = 15
+DECOY_CLUSTER_SIZE = 6
