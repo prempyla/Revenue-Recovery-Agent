@@ -90,9 +90,12 @@ def process_webhook_event(session: Session, payload: dict, now: datetime) -> Opt
         return None
 
     payment_id = _payment_id_from_reference_id(reference_id)
+    # Tagged so the audit trail distinguishes "we learned this from a
+    # webhook" from reconciliation.py's "source": "reconciliation_poll".
+    tagged_payload = {"source": "webhook", "entity": entity}
 
     if event == "payment_link.paid":
-        append_event(session, payment_id, PaymentState.RECOVERED, now, payload=entity)
+        append_event(session, payment_id, PaymentState.RECOVERED, now, payload=tagged_payload)
         session.commit()
         return payment_id
 
@@ -103,7 +106,7 @@ def process_webhook_event(session: Session, payload: dict, now: datetime) -> Opt
             PaymentState.ABANDONED,
             now,
             abandon_reason=AbandonReason.PAYMENT_FAILED,
-            payload=entity,
+            payload=tagged_payload,
         )
         session.commit()
         return payment_id

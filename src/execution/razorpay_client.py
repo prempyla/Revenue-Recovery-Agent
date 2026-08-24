@@ -40,6 +40,14 @@ class RazorpayClientInterface(ABC):
         description: str = "",
     ) -> PaymentLinkResult: ...
 
+    @abstractmethod
+    def fetch_payment_link_status(self, reference_id: str) -> Optional[PaymentLinkResult]:
+        """Current state of the link created with this reference_id, or None
+        if none was ever created. Used by reconciliation.py to recover from
+        a gap where the outcome was never locally recorded (a crash mid-call,
+        or a webhook that never arrived)."""
+        ...
+
 
 class RealRazorpayClient(RazorpayClientInterface):
     def __init__(self, key_id: Optional[str] = None, key_secret: Optional[str] = None):
@@ -79,6 +87,27 @@ class RealRazorpayClient(RazorpayClientInterface):
             "reference_id": response.get("reference_id", reference_id),
         }
 
+    def fetch_payment_link_status(self, reference_id: str) -> Optional[PaymentLinkResult]:
+        # UNVERIFIED against the live API this round -- no network calls were
+        # made from this session for this method (the manual verification
+        # procedure only exercised create + webhook receipt). Razorpay's
+        # Payment Links list endpoint is documented to support a reference_id
+        # filter; assuming payment_link.all({"reference_id": ...}) and taking
+        # the first match. If this doesn't behave as assumed, confirm/correct
+        # it the same way the webhook envelope was: a real call, inspected,
+        # not guessed twice.
+        response = self._client.payment_link.all({"reference_id": reference_id})
+        items = response.get("items", [])
+        if not items:
+            return None
+        entity = items[0]
+        return {
+            "id": entity["id"],
+            "short_url": entity["short_url"],
+            "status": entity["status"],
+            "reference_id": entity.get("reference_id", reference_id),
+        }
+
 
 class FakeRazorpayClient(RazorpayClientInterface):
     """In-memory fake. Records every call; raises on a reference_id it's
@@ -89,6 +118,7 @@ class FakeRazorpayClient(RazorpayClientInterface):
         self.calls: list[dict] = []
         self._seen_reference_ids: set[str] = set()
         self._next_id = 1
+        self._links_by_reference_id: dict[str, dict] = {}
 
     def create_payment_link(
         self,
@@ -114,9 +144,24 @@ class FakeRazorpayClient(RazorpayClientInterface):
 
         link_id = f"plink_fake_{self._next_id:04d}"
         self._next_id += 1
-        return {
+        result: PaymentLinkResult = {
             "id": link_id,
             "short_url": f"https://fake.razorpay.link/{link_id}",
             "status": "created",
             "reference_id": reference_id,
         }
+        self._links_by_reference_id[reference_id] = dict(result)
+        return result
+
+    def fetch_payment_link_status(self, reference_id: str) -> Optional[PaymentLinkResult]:
+        record = self._links_by_reference_id.get(reference_id)
+        return dict(record) if record else None
+
+    def set_status(self, reference_id: str, status: str) -> None:
+        """Test helper: simulate Razorpay-side status changing (e.g. the
+        customer paid, or the link expired) independent of anything we know
+        locally -- exactly the gap the reconciliation poller exists to close.
+        """
+        if reference_id not in self._links_by_reference_id:
+            raise KeyError(reference_id)
+        self._links_by_reference_id[reference_id]["status"] = status
