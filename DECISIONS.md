@@ -36,3 +36,6 @@ See `docs/eval_protocol_and_simulator_spec.md`. Written first specifically so th
 
 **2026-08-24 — Test mode only, no live keys generated**
 No KYC or live activation needed for the buildathon scope, and it removes any chance of accidentally touching real money during development.
+
+**2026-08-25 — Action channel added to the log schema, missing from initial spec**
+Claude Code caught that the eval spec's §4 formulas need a channel to compute success probability, but §6's persisted log entry didn't include one. Fixed: channel is now part of the audit record itself, not just an internal calculation input — an audit trail that doesn't say *how* a customer was contacted is incomplete. Also fixed: decline_reason is now explicitly mapped per instrument_type rather than left to inference.
