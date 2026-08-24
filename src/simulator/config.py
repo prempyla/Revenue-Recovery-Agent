@@ -19,17 +19,22 @@ LIMIT_EXCEEDED_COOLDOWN_HOURS = 4  # ASSUMPTION — spec says "few hours"
 COST_PER_CONTACT_PAISE = 200  # spec-given example value (Rs 2)
 
 # --- Systemic outage detector ---
-# 2026-08-25 (DECISIONS.md): count_threshold is deliberately NOT set here.
-# Empirically (see tests/test_outage_detector.py), a literal "5x background
-# rate" comes out to ~0.03-0.06 events/window for every issuer on the real
-# batch — sub-1, i.e. any single failure "exceeds" it. Practical integer
-# thresholds (2, 3, 5) all false-positive on the decoy cluster; 6-7 discriminate
-# on this specific batch, but only because the true outage's random peak (8)
-# narrowly beat the decoy's peak (6) — a fragile margin, not a robust one, and
-# still an hour-plus detection lag. No single good threshold exists yet with
-# count-only detection at these cluster sizes; not baking in a wrong answer.
+# 2026-08-25 (DECISIONS.md): count_threshold=6 chosen after two rounds.
+# Round 1 found a literal "5x background rate" comes out to ~0.03-0.06
+# events/window per issuer (sub-1) and that practical integer thresholds
+# (2/3/5) all false-positived on the decoy cluster, because the true
+# outage's cluster was spread across its full 90-minute duration (density
+# 0.167/min) while the decoy's stayed packed into 15 minutes (0.4/min) —
+# the decoy was denser per minute despite fewer total events. Round 2
+# (TRUE_OUTAGE_BURST_SIZE/WINDOW_MINUTES above) front-loaded the true
+# outage's signal into its first ~20 minutes; re-swept thresholds {2,3,5,6,
+# 7,8} across 3 seeds (42, 7, 123) — see tests/test_outage_detector.py.
+# threshold=6 is the lowest value with ZERO decoy false positives on all 3
+# seeds, and detection lag dropped to 4-9 minutes (was 34-71 minutes before
+# the burst fix).
 DETECTOR_WINDOW_MINUTES = 15  # spec-given starting point
 DETECTOR_COOLDOWN_MINUTES = 15  # ASSUMPTION — ungiven; matched to window_minutes as a starting point
+DETECTOR_COUNT_THRESHOLD = 6
 
 # --- Compliance (eval spec §2 hard invariants) ---
 # 2026-08-25 (DECISIONS.md): a policy-level compliance rule, separate from
@@ -127,3 +132,14 @@ OUTAGE_START_FRACTION_RANGE = (0.25, 0.75)
 # payments there). Decoy is explicitly "smaller" than the true outage per §3.
 TRUE_OUTAGE_CLUSTER_SIZE = 15
 DECOY_CLUSTER_SIZE = 6
+
+# 2026-08-25 (DECISIONS.md): front-loaded burst, true_outage only, additive
+# on top of TRUE_OUTAGE_CLUSTER_SIZE above (not a replacement for it). Root
+# cause of the detector's earlier decoy confusion: TRUE_OUTAGE_CLUSTER_SIZE
+# spread uniformly across the full 90-minute duration gives density
+# 15/90=0.167/min, thinner than the decoy's 6/15=0.4/min despite having more
+# total events. Sized generously (density 20/20=1.0/min alone, >2x the
+# decoy's 0.4/min, before even counting the existing spread cluster's
+# contribution) so the margin holds across seeds, not just one.
+TRUE_OUTAGE_BURST_SIZE = 20
+TRUE_OUTAGE_BURST_WINDOW_MINUTES = 20

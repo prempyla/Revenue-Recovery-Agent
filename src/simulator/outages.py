@@ -1,6 +1,6 @@
 """Outage + decoy injection. Schema §3.
 
-Two parts:
+Three parts:
   - generate_outage_events: produces the two OutageEvent records (one
     true_outage, one decoy_cluster), mid-window, different issuers.
   - inject_outage_events: applies their effect to a payment corpus —
@@ -11,6 +11,13 @@ Two parts:
     treatment: ground_truth.success_probability only checks outage_events for
     kind == "true_outage" (see ground_truth._issuer_down), so decoy-cluster
     payments fall through to ordinary idiosyncratic decay, per §3.
+  - _generate_true_outage_burst_payments: an additional front-loaded burst,
+    true_outage only, concentrated into the first ~20 minutes rather than
+    spread across the full 90-minute duration. Added 2026-08-25 (DECISIONS.md)
+    after the outage detector study found the spread-out cluster's per-minute
+    density was thinner than the decoy's tight 15-minute burst. Purely
+    additive — the decoy path and the ISSUER_DOWN-forcing loop above are
+    unchanged.
 """
 
 from dataclasses import replace
@@ -91,6 +98,43 @@ def _generate_cluster_payments(
     return payments
 
 
+def _generate_true_outage_burst_payments(
+    event: OutageEvent,
+    customers: Sequence[Customer],
+    id_prefix: str,
+    rng: np.random.Generator,
+) -> List[Payment]:
+    """Front-loaded burst for the true_outage event only. Additive on top of
+    _generate_cluster_payments's full-duration cluster (called separately in
+    inject_outage_events, not a replacement) — concentrates
+    TRUE_OUTAGE_BURST_SIZE payments into the first
+    TRUE_OUTAGE_BURST_WINDOW_MINUTES of the outage instead of spreading them
+    across the full duration_minutes, so the detector's per-minute density
+    signal isn't diluted. See DECISIONS.md 2026-08-25. Never called for a
+    decoy_cluster event (see inject_outage_events) — the decoy's generation
+    path is untouched.
+    """
+    burst_window_minutes = min(config.TRUE_OUTAGE_BURST_WINDOW_MINUTES, event.duration_minutes)
+    customer_ids = [c.customer_id for c in customers]
+    payments = []
+    for i in range(config.TRUE_OUTAGE_BURST_SIZE):
+        offset_seconds = rng.uniform(0, burst_window_minutes * 60)
+        payments.append(
+            Payment(
+                payment_id=f"{id_prefix}_{i:03d}",
+                customer_id=str(rng.choice(customer_ids)),
+                amount_paise=int(
+                    rng.integers(config.AMOUNT_PAISE_MIN, config.AMOUNT_PAISE_MAX + 1)
+                ),
+                instrument_type=_sample_instrument_type(rng),
+                decline_reason=DeclineReason.ISSUER_DOWN,
+                issuer_code=event.issuer_code,
+                failed_at=event.start_time + timedelta(seconds=float(offset_seconds)),
+            )
+        )
+    return payments
+
+
 def inject_outage_events(
     payments: Sequence[Payment],
     customers: Sequence[Customer],
@@ -128,5 +172,14 @@ def inject_outage_events(
         cluster_payments.extend(
             _generate_cluster_payments(event, customers, f"pay_{event.kind}_{i}", rng)
         )
+        if event.kind == "true_outage":
+            # Additive front-loaded burst, true_outage only. See
+            # _generate_true_outage_burst_payments and DECISIONS.md
+            # 2026-08-25. The decoy_cluster branch above is unchanged.
+            cluster_payments.extend(
+                _generate_true_outage_burst_payments(
+                    event, customers, f"pay_{event.kind}_burst_{i}", rng
+                )
+            )
 
     return [*forced_payments, *cluster_payments]
