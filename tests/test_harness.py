@@ -191,7 +191,7 @@ def _weekly_cap_persona():
     )
 
 
-def _fake_run_result(customer_id: str, action_times) -> RunResult:
+def _fake_run_result(customer_id: str, action_times, opted_out_at=None) -> RunResult:
     payment = Payment(
         payment_id="pay_weekly",
         customer_id=customer_id,
@@ -217,7 +217,49 @@ def _fake_run_result(customer_id: str, action_times) -> RunResult:
         for i, t in enumerate(action_times)
     ]
     outcomes = [PaymentOutcome(payment=payment, recovered=False, recovered_at=None)]
-    return RunResult(policy_name="test", implemented=True, log_entries=log_entries, outcomes=outcomes)
+    return RunResult(
+        policy_name="test",
+        implemented=True,
+        log_entries=log_entries,
+        outcomes=outcomes,
+        opted_out_at=opted_out_at,
+    )
+
+
+def test_explicit_opt_out_invariant_flags_contacts_at_or_after_the_opt_out_timestamp():
+    persona = _weekly_cap_persona()
+    base = datetime(2026, 1, 1, 10)
+    times = [base, base + timedelta(hours=1), base + timedelta(hours=2)]
+    # Opted out between the 2nd and 3rd contact -- only the 3rd is a violation.
+    opted_out_at = {persona.customer_id: base + timedelta(hours=1, minutes=30)}
+    result = _fake_run_result(persona.customer_id, times, opted_out_at=opted_out_at)
+    invariants = harness_module._check_invariants(result, {persona.customer_id: persona})
+    assert invariants["zero_contacts_after_explicit_opt_out"] is False
+    assert invariants["contacts_after_explicit_opt_out_count"] == 1
+
+
+def test_explicit_opt_out_invariant_is_zero_when_no_opt_out_recorded():
+    persona = _weekly_cap_persona()
+    base = datetime(2026, 1, 1, 10)
+    times = [base, base + timedelta(hours=1)]
+    result = _fake_run_result(persona.customer_id, times, opted_out_at=None)
+    invariants = harness_module._check_invariants(result, {persona.customer_id: persona})
+    assert invariants["zero_contacts_after_explicit_opt_out"] is True
+    assert invariants["contacts_after_explicit_opt_out_count"] == 0
+
+
+def test_explicit_opt_out_invariant_is_distinct_from_annoyance_threshold_invariant():
+    """A customer can be flagged by one and not the other -- they measure
+    different things (stated request vs hidden persona patience)."""
+    persona = _weekly_cap_persona()  # annoyance_threshold=10, won't trip on 2 contacts
+    base = datetime(2026, 1, 1, 10)
+    times = [base, base + timedelta(hours=1)]
+    opted_out_at = {persona.customer_id: base}  # opted out immediately
+    result = _fake_run_result(persona.customer_id, times, opted_out_at=opted_out_at)
+    invariants = harness_module._check_invariants(result, {persona.customer_id: persona})
+    assert invariants["zero_contacts_after_opt_out"] is True  # persona patience never exceeded
+    assert invariants["zero_contacts_after_explicit_opt_out"] is False  # but they DID say stop
+    assert invariants["contacts_after_explicit_opt_out_count"] == 2
 
 
 def test_weekly_cap_violation_detected_when_dense_within_7_days():

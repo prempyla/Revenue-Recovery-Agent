@@ -169,12 +169,12 @@ def test_tracker_flips_opted_out_exactly_when_count_exceeds_threshold():
     for expected_count_before in range(0, threshold + 2):
         count_before = tracker.contact_count(customer_id)
         assert count_before == expected_count_before
-        assert tracker.is_opted_out(customer_id, threshold) == (count_before > threshold)
+        assert tracker.is_annoyance_threshold_exceeded(customer_id, threshold) == (count_before > threshold)
         tracker.record(customer_id, action)
 
     # After threshold+2 recorded contacts, contact_count is threshold+2 > threshold.
     assert tracker.contact_count(customer_id) == threshold + 2
-    assert tracker.is_opted_out(customer_id, threshold) is True
+    assert tracker.is_annoyance_threshold_exceeded(customer_id, threshold) is True
 
 
 def test_customer_never_recovers_after_opt_out_even_with_favorable_timing():

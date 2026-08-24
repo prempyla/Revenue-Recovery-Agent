@@ -149,6 +149,55 @@ def test_issuer_down_no_outage_detected_uses_the_short_retry_offset():
     assert action.action_type == ActionType.RETRY_SCHEDULED
 
 
+def test_explicit_opt_out_vetoes_regardless_of_weekly_cap_or_contact_hours():
+    """DECISIONS.md 2026-08-25: explicit_opt_out is its own hard veto, not
+    folded into the weekly-cap check -- a customer who's never been
+    contacted (contact_count=0, well inside their allowed hours) but HAS
+    explicitly opted out must still be vetoed."""
+    persona = _persona()
+    tracker = ContactTracker()
+    tracker.mark_opted_out(persona.customer_id, DEFAULT_FAILED_AT)  # before any action
+
+    payment = _payment(DeclineReason.AFA_3DS_DROPOFF)  # customer-facing (send_nudge)
+    decision = decide(payment, persona, WINDOW_START, tracker, [], [])
+    assert decision is None
+
+
+def test_explicit_opt_out_does_not_retroactively_veto_actions_scheduled_before_it():
+    """as_of semantics: an opt-out recorded AFTER a candidate's action_time
+    doesn't veto that candidate -- the customer hadn't said stop yet."""
+    persona = _persona()
+    tracker = ContactTracker()
+    payment = _payment(DeclineReason.AFA_3DS_DROPOFF)  # candidate fires at failed_at+30min
+    opted_out_after_the_candidates_action_time = payment.failed_at + timedelta(hours=5)
+    tracker.mark_opted_out(persona.customer_id, opted_out_after_the_candidates_action_time)
+
+    decision = decide(payment, persona, WINDOW_START, tracker, [], [])
+    assert decision is not None
+
+
+def test_explicit_opt_out_is_reported_as_a_distinct_reason_from_weekly_cap():
+    """The two hard-cap-shaped vetoes must be independently identifiable,
+    not merged into one ambiguous reason string."""
+    from simulator.full_agent import Candidate, _veto_reason
+    from simulator.types import Action
+
+    persona = _persona()
+    action_time = DEFAULT_FAILED_AT
+    candidate = Candidate(timedelta(0), Action(ActionType.SEND_NUDGE), 0.4)
+
+    opted_out_tracker = ContactTracker()
+    opted_out_tracker.mark_opted_out(persona.customer_id, action_time)
+    assert _veto_reason(candidate, persona, action_time, opted_out_tracker) == "explicit_opt_out"
+
+    from simulator import config
+
+    capped_tracker = ContactTracker()
+    for _ in range(config.MAX_WEEKLY_CONTACTS):
+        capped_tracker._counts[persona.customer_id] = capped_tracker.contact_count(persona.customer_id) + 1
+    assert _veto_reason(candidate, persona, action_time, capped_tracker) == "weekly_cap"
+
+
 def test_tiny_payment_amount_can_make_stop_win_over_a_customer_facing_action():
     """expected_value = rate * amount - cost; when amount is small enough
     that cost dominates, STOP (score 0) beats every real candidate."""

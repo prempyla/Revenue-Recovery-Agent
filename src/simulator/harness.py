@@ -59,6 +59,11 @@ class RunResult:
     log_entries: Optional[List[LogEntry]] = None
     outcomes: Optional[List[PaymentOutcome]] = None
     error: Optional[str] = None
+    # Explicit opt-out timestamps captured from this run's ContactTracker
+    # (customer_id -> when they opted out), distinct from the hidden
+    # annoyance_threshold used by zero_contacts_after_opt_out below. See
+    # contact_tracking.py's module docstring and DECISIONS.md 2026-08-25.
+    opted_out_at: Dict[str, datetime] = None
 
 
 def _reason_for(policy_name: str, payment: Payment, attempt_index: int, plan_len: int) -> str:
@@ -151,7 +156,11 @@ def run_policy(
         )
 
     return RunResult(
-        policy_name=policy_name, implemented=True, log_entries=log_entries, outcomes=outcomes
+        policy_name=policy_name,
+        implemented=True,
+        log_entries=log_entries,
+        outcomes=outcomes,
+        opted_out_at=tracker.all_opted_out(),
     )
 
 
@@ -189,10 +198,14 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
         if not (start <= e.action_time.hour < end):
             outside_hours_count += 1
 
-    # Zero contacts after opt-out: replay contact_count per customer in the
-    # same order run_policy recorded them, and check whether any
-    # customer-facing entry happened when the count-before already exceeded
-    # that customer's annoyance_threshold.
+    # Zero contacts after HIDDEN PERSONA PATIENCE exhausted: replay
+    # contact_count per customer in the same order run_policy recorded them,
+    # and check whether any customer-facing entry happened when the
+    # count-before already exceeded that customer's (hidden, ground-truth)
+    # annoyance_threshold. This is a derived/implicit signal a policy can
+    # never see in advance — distinct from the EXPLICIT opt-out check below,
+    # which is a stated customer request. See contact_tracking.py's module
+    # docstring and DECISIONS.md 2026-08-25.
     contact_counts: Dict[str, int] = {}
     after_opt_out_count = 0
     for e in log_entries:
@@ -203,6 +216,26 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
         if count_before > customer.annoyance_threshold:
             after_opt_out_count += 1
         contact_counts[customer.customer_id] = count_before + 1
+
+    # Zero contacts after EXPLICIT opt-out: uses this run's own
+    # ContactTracker.opted_out_at map (result.opted_out_at), not persona
+    # data — a customer-facing entry is a violation if it happened at or
+    # after the timestamp they were marked opted_out (llm.classify_reply ->
+    # OPT_OUT -> tracker.mark_opted_out). Zero on every policy in the
+    # current batch harness runs: no synthetic reply generation exists yet
+    # to ever set this, so it's reported honestly as 0/0, a built and tested
+    # capability rather than a number padded to look exercised. Real once
+    # replies are wired in (execution layer's webhook flow, or a future
+    # synthetic-reply generator for the batch simulator).
+    opted_out_at = result.opted_out_at or {}
+    after_explicit_opt_out_count = 0
+    for e in log_entries:
+        if not e.is_customer_facing:
+            continue
+        customer_id = payments_by_id[e.payment_id].customer_id
+        opt_out_time = opted_out_at.get(customer_id)
+        if opt_out_time is not None and e.action_time >= opt_out_time:
+            after_explicit_opt_out_count += 1
 
     # Rolling weekly contact cap: for each customer, and each customer-facing
     # action to them, count how many customer-facing actions to that same
@@ -235,6 +268,8 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
         "contacts_outside_allowed_hours_count": outside_hours_count,
         "zero_contacts_after_opt_out": after_opt_out_count == 0,
         "contacts_after_opt_out_count": after_opt_out_count,
+        "zero_contacts_after_explicit_opt_out": after_explicit_opt_out_count == 0,
+        "contacts_after_explicit_opt_out_count": after_explicit_opt_out_count,
         "zero_weekly_cap_violations": weekly_cap_violation_count == 0,
         "weekly_cap_violation_count": weekly_cap_violation_count,
     }

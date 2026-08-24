@@ -197,32 +197,39 @@ def _veto_reason(
 ) -> Optional[str]:
     """None if the candidate is allowed; a reason string if it must be
     vetoed before scoring ever sees it. Only customer-facing candidates are
-    subject to these -- a silent retry doesn't contact anyone."""
+    subject to these -- a silent retry doesn't contact anyone.
+
+    Three distinct hard constraints, checked in this order, each its own
+    named reason (DECISIONS.md 2026-08-25 — explicit_opt_out was previously
+    folded into weekly_cap as a proxy; that conflated a stated customer
+    request with a rate limit and produced a correct-looking but falsely-
+    labeled audit trail, the same class of problem ABANDONED collapsing
+    three meanings would have been):
+      1. explicit_opt_out -- the customer said stop (llm.classify_reply ->
+         OPT_OUT -> tracker.mark_opted_out). Permanent, checked first.
+      2. outside_contact_hours -- this customer's declared window.
+      3. weekly_cap -- config.MAX_WEEKLY_CONTACTS against the tracker's
+         running lifetime count. Deliberately conservative: decide() only
+         has a lifetime count, not a timestamped rolling-window history, so
+         it can't distinguish "3 contacts this week" from "3 spread over 3
+         months" the way the harness's post-hoc rolling-window audit can
+         (harness._check_invariants). Erring toward under-contacting rather
+         than pretending to have precision this function's inputs don't
+         support; that audit remains the precise measurement, reported
+         alongside this policy in the comparison table.
+    """
     if not _is_customer_facing(candidate.action):
         return None
+
+    if tracker.is_opted_out(customer.customer_id, as_of=action_time):
+        return "explicit_opt_out"
 
     start, end = customer.contact_hours
     if not (start <= action_time.hour < end):
         return "outside_contact_hours"
 
-    # Weekly-cap and opt-out collapse into one proactive check here:
-    # decide() only has a running lifetime contact_count from the tracker
-    # (ContactTracker), not a timestamped rolling-window history, so it
-    # can't distinguish "3 contacts this week" from "3 contacts spread over
-    # 3 months" the way the harness's post-hoc rolling-window invariant
-    # audit can (harness._check_invariants, the real MAX_WEEKLY_CONTACTS
-    # check). This is a deliberately conservative simplification: gate on
-    # the same MAX_WEEKLY_CONTACTS constant, erring toward under-contacting
-    # rather than pretending to have precision this function's inputs don't
-    # support. It also serves as the opt-out proxy -- once tripped, this
-    # customer gets no further customer-facing candidates for the rest of
-    # the run, which is the same "permanently unrecoverable" shape as opting
-    # out even though it isn't reading the hidden annoyance_threshold. The
-    # harness's own invariant audit remains the precise, authoritative
-    # measurement of what actually happened, reported alongside this policy
-    # in the comparison table.
     if tracker.contact_count(customer.customer_id) >= config.MAX_WEEKLY_CONTACTS:
-        return "weekly_cap_or_opt_out_proxy"
+        return "weekly_cap"
 
     return None
 
