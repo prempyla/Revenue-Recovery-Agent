@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 from datetime import datetime
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -40,9 +41,27 @@ def test_bad_signature_is_rejected():
     app = create_app(session_factory, WEBHOOK_SECRET)
     client = TestClient(app)
 
-    body = json.dumps({"id": "evt_1", "event": "payment_link.paid", "payload": {}}).encode()
+    body = json.dumps({"event": "payment_link.paid", "payload": {}}).encode()
     response = client.post(
-        "/webhooks/razorpay", content=body, headers={"X-Razorpay-Signature": "wrong"}
+        "/webhooks/razorpay",
+        content=body,
+        headers={"X-Razorpay-Signature": "wrong", "X-Razorpay-Event-Id": "evt_1"},
+    )
+    assert response.status_code == 400
+
+
+def test_missing_event_id_header_is_rejected():
+    """Verified against 6 real webhook deliveries (see webhook.py's module
+    docstring): the event id is ONLY in the header, never the body. A
+    request with a valid signature but no X-Razorpay-Event-Id header must
+    still be rejected, not silently accepted with no dedup key."""
+    session_factory = _session_factory()
+    app = create_app(session_factory, WEBHOOK_SECRET)
+    client = TestClient(app)
+
+    body = json.dumps({"event": "payment_link.paid", "payload": {}}).encode()
+    response = client.post(
+        "/webhooks/razorpay", content=body, headers={"X-Razorpay-Signature": _sign(body)}
     )
     assert response.status_code == 400
 
@@ -58,13 +77,14 @@ def test_valid_signature_is_accepted_and_processed():
     client = TestClient(app)
 
     body_dict = {
-        "id": "evt_1",
         "event": "payment_link.paid",
         "payload": {"payment_link": {"entity": {"reference_id": idem_key}}},
     }
     body = json.dumps(body_dict).encode()
     response = client.post(
-        "/webhooks/razorpay", content=body, headers={"X-Razorpay-Signature": _sign(body)}
+        "/webhooks/razorpay",
+        content=body,
+        headers={"X-Razorpay-Signature": _sign(body), "X-Razorpay-Event-Id": "evt_1"},
     )
     assert response.status_code == 200
 
@@ -83,12 +103,11 @@ def test_duplicate_event_id_is_deduped_and_processed_only_once():
     client = TestClient(app)
 
     body_dict = {
-        "id": "evt_dup",
         "event": "payment_link.paid",
         "payload": {"payment_link": {"entity": {"reference_id": idem_key}}},
     }
     body = json.dumps(body_dict).encode()
-    headers = {"X-Razorpay-Signature": _sign(body)}
+    headers = {"X-Razorpay-Signature": _sign(body), "X-Razorpay-Event-Id": "evt_dup"}
 
     first = client.post("/webhooks/razorpay", content=body, headers=headers)
     second = client.post("/webhooks/razorpay", content=body, headers=headers)
@@ -117,6 +136,42 @@ def test_process_webhook_event_payment_expired_abandons_with_payment_failed_reas
     assert derive_state(session, "pay_x") == PaymentState.ABANDONED
     last_event = history(session, "pay_x")[-1]
     assert last_event.abandon_reason == AbandonReason.PAYMENT_FAILED.value
+
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_real_payment_link_paid_fixture_parses_and_recovers():
+    """Real webhook payload captured 2026-08-24 via ngrok's inspector during
+    manual verification (docs/manual_webhook_verification.md) -- not a
+    hand-written approximation. Confirms process_webhook_event handles the
+    actual structure Razorpay sends, not just our assumption of it."""
+    fixture = json.loads((FIXTURES_DIR / "real_webhook_payment_link_paid.json").read_text())
+    assert fixture["event"] == "payment_link.paid"
+    reference_id = fixture["payload"]["payment_link"]["entity"]["reference_id"]
+
+    session_factory = _session_factory()
+    session = session_factory()
+    payment_id = reference_id.split(":attempt:")[0]
+    _to_awaiting_confirmation(session, payment_id, datetime(2026, 1, 1))
+
+    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1))
+
+    assert acted_on == payment_id
+    assert derive_state(session, payment_id) == PaymentState.RECOVERED
+
+
+def test_real_payment_failed_fixture_is_ignored_not_acted_on():
+    """Real payment.failed payload -- not a payment_link event, so
+    process_webhook_event correctly leaves state untouched rather than
+    raising or guessing at an unrelated event type."""
+    fixture = json.loads((FIXTURES_DIR / "real_webhook_payment_failed.json").read_text())
+    assert fixture["event"] == "payment.failed"
+
+    session_factory = _session_factory()
+    session = session_factory()
+    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1))
+    assert acted_on is None
 
 
 def test_is_duplicate_event_false_before_seen_true_after():

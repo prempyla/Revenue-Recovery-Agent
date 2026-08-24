@@ -1,0 +1,121 @@
+{
+    "account_id": "acc_TTZKzjxvbGGEss",
+    "contains": [
+        "payment_link",
+        "order",
+        "payment"
+    ],
+    "created_at": 1787590329,
+    "entity": "event",
+    "event": "payment_link.paid",
+    "payload": {
+        "order": {
+            "entity": {
+                "amount": 100,
+                "amount_due": 0,
+                "amount_paid": 100,
+                "attempts": 2,
+                "checkout": null,
+                "created_at": 1787590413,
+                "currency": "INR",
+                "description": null,
+                "entity": "order",
+                "id": "order_TTgCuG8Lupu2X5",
+                "notes": [],
+                "offer_id": null,
+                "receipt": "manual-verification-pay:attempt:1",
+                "status": "paid"
+            }
+        },
+        "payment": {
+            "entity": {
+                "acquirer_data": {
+                    "auth_code": "471228"
+                },
+                "amount": 100,
+                "amount_refunded": 0,
+                "amount_transferred": 0,
+                "bank": null,
+                "base_amount": 100,
+                "captured": true,
+                "card": {
+                    "emi": false,
+                    "entity": "card",
+                    "id": "card_TTgIndOumSB96s",
+                    "international": false,
+                    "issuer": "DCBL",
+                    "last4": "1007",
+                    "name": "",
+                    "network": "Visa",
+                    "sub_type": "consumer",
+                    "token_iin": "410028000",
+                    "type": "debit"
+                },
+                "card_id": "card_TTgIndOumSB96s",
+                "contact": "+919999999999",
+                "created_at": 1787590749,
+                "currency": "INR",
+                "description": "#TTgBPpRA1eCfsL",
+                "email": "redacted@example.com",
+                "entity": "payment",
+                "error_code": null,
+                "error_description": null,
+                "error_reason": null,
+                "error_source": null,
+                "error_step": null,
+                "fee": 3,
+                "fee_bearer": "platform",
+                "id": "pay_TTgInPgXNYJn0m",
+                "international": false,
+                "invoice_id": null,
+                "method": "card",
+                "notes": [],
+                "order_id": "order_TTgCuG8Lupu2X5",
+                "refund_status": null,
+                "status": "captured",
+                "tax": 0,
+                "vpa": null,
+                "wallet": null
+            }
+        },
+        "payment_link": {
+            "entity": {
+                "accept_partial": false,
+                "allow_full_payment": false,
+                "amount": 100,
+                "amount_paid": 100,
+                "cancelled_at": 0,
+                "created_at": 1787590329,
+                "currency": "INR",
+                "customer": {
+                    "contact": "9000000000",
+                    "name": "Manual Verification Test"
+                },
+                "description": "Manual webhook verification -- see docs/manual_webhook_verification.md",
+                "expire_by": 0,
+                "expired_at": 0,
+                "first_min_partial_amount": 0,
+                "id": "plink_TTgBPpRA1eCfsL",
+                "notes": null,
+                "notify": {
+                    "email": false,
+                    "sms": false,
+                    "whatsapp": false
+                },
+                "order_id": "order_TTgCuG8Lupu2X5",
+                "payment_plan": false,
+                "reference_id": "manual-verification-pay:attempt:1",
+                "reminder_enable": true,
+                "reminders": {
+                    "status": "failed"
+                },
+                "short_url": "https://rzp.io/rzp/dmZ54ax8",
+                "status": "paid",
+                "updated_at": 1787590765,
+                "upi_link": false,
+                "user_id": "",
+                "whatsapp_link": false
+            }
+        }
+    }
+}

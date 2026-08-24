@@ -68,10 +68,14 @@ payload wins, not this doc.
    ```bash
    .venv/bin/python -m execution.create_demo_link
    ```
-   This prints a `short_url` (e.g. `https://rzp.io/i/...`). Open it in a
-   browser and pay using [Razorpay's published test
-   credentials](https://razorpay.com/docs/payments/payments/test-card-upi-details/)
-   (a test card number, any future expiry, any CVV; or a test UPI VPA).
+   This prints a `short_url` (e.g. `https://rzp.io/rzp/...`). Open it in a
+   browser and pay with a documented **domestic** test card — `4111 1111
+   1111 1111` looked like a standard test number but is NOT actually in
+   Razorpay's current domestic list and gets rejected as "international
+   cards are not supported" (confirmed 2026-08-24). Use one that's
+   confirmed to work instead:
+   - Card: `4100 2800 0000 1007`, any future expiry, any CVV
+   - Then any 4–6 digit OTP to succeed (under 4 digits deliberately fails)
 
 6. **Read the actual payload from the ngrok inspector** (http://127.0.0.1:4040):
    click the `POST /webhooks/razorpay` request, view the raw request body.
@@ -93,4 +97,26 @@ payload wins, not this doc.
 
 ## Actual captured payload
 
-_(not yet recorded — fill in after running the procedure above)_
+**Recorded 2026-08-24.** Ran the full procedure above. Full payloads (email/phone
+redacted before committing — this repo is public) are saved as
+`tests/fixtures/real_webhook_payment_link_paid.json` and
+`real_webhook_payment_failed.json`, and exercised directly by
+`tests/test_execution_webhook.py::test_real_payment_link_paid_fixture_parses_and_recovers`.
+
+What matched the assumption:
+- `payload.payment_link.entity.reference_id` — correct structure, no change needed.
+- Top-level event name `payment_link.paid` — correct.
+
+What didn't match (fixed in `webhook.py`, see DECISIONS.md 2026-08-25):
+- **Event id location.** The body has no `id` or `event_id` field at all —
+  every one of 6 real deliveries carried it only in the
+  `X-Razorpay-Event-Id` header. The endpoint now reads the header instead
+  of the body.
+- Observed as a side effect: Razorpay actually retries a failing webhook
+  (every event was redelivered multiple times while our endpoint 400'd on
+  the event-id bug above) — confirms at-least-once delivery is real
+  behavior, not just documentation.
+
+Fix verified twice: the fixture-based unit test above, and a live replay
+of the exact captured payload against the running (fixed) local server —
+which went from `400` to `200`.

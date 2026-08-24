@@ -12,11 +12,21 @@ Two SDK behaviors worth flagging up front, verified against the installed
   - It raises SignatureVerificationError on mismatch rather than returning
     False. verify_signature() below catches that and returns bool.
 
-The exact webhook JSON envelope (event name, payload.payment_link.entity
-field names) is built against Razorpay's documented shape but has NOT been
-verified against a live webhook from this session -- see
-docs/manual_webhook_verification.md. Treat a real captured payload as the
-source of truth over what's assumed here.
+Verified 2026-08-24 against 6 real webhook deliveries captured during manual
+verification (docs/manual_webhook_verification.md; fixtures in
+tests/fixtures/real_webhook_*.json):
+  - payload.payment_link.entity.reference_id was correctly assumed --
+    that structural shape needed no change.
+  - The event id location was WRONG: it assumed payload["id"] or
+    payload["event_id"] in the JSON body. Real deliveries never carry an id
+    in the body at all -- it's only ever in the X-Razorpay-Event-Id header.
+    Every real webhook received during verification got rejected with 400
+    "missing event id" until this was fixed to read the header.
+  - Razorpay retries a failing webhook repeatedly (visible in the captured
+    requests: payment.failed/authorized/captured/order.paid/
+    payment_link.paid each delivered multiple times while every attempt was
+    400ing) -- confirms at-least-once delivery is real, not just a spec
+    claim, and that is_duplicate_event()'s dedup earns its place here.
 """
 
 import json
@@ -109,16 +119,24 @@ def create_app(session_factory: sessionmaker, webhook_secret: str) -> FastAPI:
         request: Request,
         background_tasks: BackgroundTasks,
         x_razorpay_signature: str = Header(default=""),
+        x_razorpay_event_id: str = Header(default=""),
     ):
         raw_body = await request.body()
 
         if not verify_signature(raw_body, x_razorpay_signature, webhook_secret):
             raise HTTPException(status_code=400, detail="invalid signature")
 
-        payload = json.loads(raw_body)
-        event_id = payload.get("id") or payload.get("event_id")
+        # Verified against 6 real webhook deliveries (see
+        # docs/manual_webhook_verification.md): the event id is ONLY ever in
+        # the X-Razorpay-Event-Id header. It is never present in the JSON
+        # body under "id" or "event_id" -- an earlier assumption that every
+        # single real delivery during manual verification hit and got
+        # rejected for. Trusting the header, not the body, for this.
+        event_id = x_razorpay_event_id
         if not event_id:
             raise HTTPException(status_code=400, detail="missing event id")
+
+        payload = json.loads(raw_body)
 
         session = session_factory()
         try:
