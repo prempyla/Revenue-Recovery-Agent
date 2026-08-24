@@ -124,10 +124,16 @@ def run_policy(
                 )
             )
 
-            if success:
+            if success and not recovered:
+                # First chronological success only. Deliberately no `break`:
+                # naive_fixed_retry fires all 3 attempts regardless of prior
+                # outcome (each an independent Bernoulli draw against ground
+                # truth), so a payment_id can end up with more than one
+                # "success" outcome logged — that's the double-charge
+                # scenario zero_double_charges (_check_invariants) exists to
+                # catch. total_recovered only ever credits the first one.
                 recovered = True
                 recovered_at = action_time
-                break  # stop the plan early once recovered
 
         outcomes.append(
             PaymentOutcome(payment=payment, recovered=recovered, recovered_at=recovered_at)
@@ -148,8 +154,11 @@ def _check_invariants(result: RunResult, customers_by_id: Dict[str, Customer]) -
     payments_by_id = {o.payment.payment_id: o.payment for o in outcomes}
 
     # Zero double-charges: no payment should have more than one success
-    # logged against it. The harness stops a plan on first success, so this
-    # checks that guarantee actually held rather than assuming it.
+    # logged against it. run_policy() does NOT stop firing a plan's remaining
+    # attempts after a success (naive_fixed_retry is deliberately blind to
+    # prior outcome), so this is a real check, not a vacuous one — a policy
+    # whose later independent Bernoulli draws also come back "success" for
+    # an already-recovered payment will show up here.
     success_counts: Dict[str, int] = {}
     for e in log_entries:
         if e.outcome == "success":

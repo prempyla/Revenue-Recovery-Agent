@@ -88,11 +88,26 @@ def test_do_nothing_never_violates_any_invariant():
     assert invariants["zero_contacts_after_opt_out"] is True
 
 
-def test_no_policy_ever_double_charges():
+def test_single_action_policies_never_double_charge():
+    """do_nothing (0 actions/payment) and rules_only (at most 1 action/
+    payment) can never log two successes for the same payment_id — that
+    requires a multi-attempt plan, which only naive_fixed_retry has."""
     customers, payments, events = _sample_batch()
     results = run_eval(payments, customers, events, seed=1)
-    for name in ("do_nothing", "naive_fixed_retry", "rules_only"):
+    for name in ("do_nothing", "rules_only"):
         assert results[name]["invariants"]["zero_double_charges"] is True
+
+
+def test_naive_fixed_retry_can_double_charge_on_a_real_batch():
+    """naive fires all 3 attempts regardless of prior outcome (unlike
+    rules_only/do_nothing), so on a large enough batch some payments will
+    log more than one independent-Bernoulli-draw success. This is expected —
+    it's exactly what the invariant exists to catch, not a harness bug."""
+    customers, payments, events = _sample_batch()
+    results = run_eval(payments, customers, events, seed=1)
+    invariants = results["naive_fixed_retry"]["invariants"]
+    assert invariants["zero_double_charges"] is False
+    assert invariants["double_charge_count"] > 0
 
 
 def _weekly_cap_persona():
@@ -172,6 +187,44 @@ def test_weekly_cap_resets_once_contacts_fall_outside_the_rolling_window():
     invariants = harness_module._check_invariants(result, {persona.customer_id: persona})
     assert invariants["zero_weekly_cap_violations"] is True
     assert invariants["weekly_cap_violation_count"] == 0
+
+
+def test_naive_double_charge_is_logged_fully_but_revenue_counted_once():
+    """Deterministic proof: force ground truth to certain success (prob=1.0
+    on every attempt) so naive's 3 independent Bernoulli draws all come back
+    'success'. The action log must show all 3 (audit trail stays complete),
+    the double_charge invariant must flag exactly this payment, and
+    total_recovered must still count the payment's amount exactly once."""
+    from unittest.mock import patch
+
+    from simulator.policies import naive_fixed_retry_policy
+
+    persona = _weekly_cap_persona()  # annoyance_threshold=10, contact_hours=(0,24) — won't interfere
+    payment = Payment(
+        payment_id="pay_certain",
+        customer_id=persona.customer_id,
+        amount_paise=500_000,
+        instrument_type=InstrumentType.CARD,
+        decline_reason=DeclineReason.NETWORK_TIMEOUT,
+        issuer_code="HDFC",
+        failed_at=datetime(2026, 1, 1),
+    )
+    customers_by_id = {persona.customer_id: persona}
+
+    with patch.object(harness_module, "success_probability", return_value=1.0):
+        result = harness_module.run_policy(
+            "naive_fixed_retry", naive_fixed_retry_policy, [payment], customers_by_id, [], seed=1
+        )
+
+    success_entries = [e for e in result.log_entries if e.outcome == "success"]
+    assert len(success_entries) == 3  # every attempt logged, none suppressed
+
+    invariants = harness_module._check_invariants(result, customers_by_id)
+    assert invariants["zero_double_charges"] is False
+    assert invariants["double_charge_count"] == 1  # one payment_id over-counted, not one per attempt
+
+    metrics = harness_module.compute_metrics(result, [], customers_by_id)
+    assert metrics["total_recovered_rupees"] == payment.amount_paise / 100.0  # counted once, not 3x
 
 
 def test_rules_only_never_retries_a_risk_decline_or_terminal_category():
