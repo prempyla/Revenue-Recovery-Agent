@@ -68,7 +68,7 @@ def test_intent_survives_a_simulated_crash_between_persist_and_execute(tmp_path)
     assert derive_state(session_2, "pay_x") == PaymentState.SCHEDULED
 
     client = FakeRazorpayClient()
-    processed = run_outbox_worker_once(session_2, client, now)
+    processed = run_outbox_worker_once(session_2, client, now, "worker_1")
 
     assert len(processed) == 1
     assert processed[0].status == "done"
@@ -89,7 +89,7 @@ def test_unmapped_action_type_raises_not_implemented():
     )
     client = FakeRazorpayClient()
     with pytest.raises(NotImplementedError):
-        run_outbox_worker_once(session, client, now)
+        run_outbox_worker_once(session, client, now, "worker_1")
 
 
 def test_simulated_action_types_are_dispatched_without_a_real_api_call():
@@ -107,7 +107,7 @@ def test_simulated_action_types_are_dispatched_without_a_real_api_call():
         )
         client = FakeRazorpayClient()
 
-        processed = run_outbox_worker_once(session, client, now)
+        processed = run_outbox_worker_once(session, client, now, "worker_1")
 
         assert client.calls == [], f"{action_type}: must not make a real API call"
         assert processed[0].status == "done"
@@ -138,7 +138,7 @@ def test_execution_error_marks_abandoned_with_execution_error_reason():
     client = FakeRazorpayClient()
     client._seen_reference_ids.add(idem_key)  # force the create call to raise
 
-    processed = run_outbox_worker_once(session, client, now)
+    processed = run_outbox_worker_once(session, client, now, "worker_1")
 
     assert processed[0].status == "failed"
     assert processed[0].error is not None

@@ -54,7 +54,7 @@ def test_full_path_ends_in_recovered_when_webhook_confirms_payment():
     # worker must be polled with a `now` past due_at, not the same `now`
     # the intent was scheduled at, or it's correctly skipped as not-yet-due.
     worker_now = intent.due_at
-    processed = run_outbox_worker_once(session, client, worker_now)
+    processed = run_outbox_worker_once(session, client, worker_now, "worker_1")
     assert processed[0].status == "done"
     assert derive_state(session, "pay_e2e") == PaymentState.AWAITING_CONFIRMATION
 
@@ -93,7 +93,7 @@ def test_full_path_ends_in_abandoned_when_webhook_reports_expiry():
     # worker at all (still legal per the FSM, but not what this test claims
     # to exercise).
     worker_now = intent.due_at
-    processed = run_outbox_worker_once(session, client, worker_now)
+    processed = run_outbox_worker_once(session, client, worker_now, "worker_1")
     assert processed[0].status == "done"
     assert derive_state(session, "pay_e2e") == PaymentState.AWAITING_CONFIRMATION
 

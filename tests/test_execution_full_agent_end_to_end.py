@@ -70,7 +70,7 @@ def test_full_agent_send_payment_link_path_ends_in_recovered_via_webhook():
     assert derive_state(session, "pay_fa_link") == PaymentState.SCHEDULED
 
     client = FakeRazorpayClient()
-    processed = run_outbox_worker_once(session, client, intent.due_at)
+    processed = run_outbox_worker_once(session, client, intent.due_at, "worker_1")
     assert processed[0].status == "done"
     assert len(client.calls) == 1  # a real dispatch happened
     assert derive_state(session, "pay_fa_link") == PaymentState.AWAITING_CONFIRMATION
@@ -114,7 +114,7 @@ def test_full_agent_retry_now_path_is_dispatched_as_a_logged_simulated_send():
     assert intent.due_at == WINDOW_START + timedelta(minutes=2)  # full_agent's NETWORK_TIMEOUT offset
 
     client = FakeRazorpayClient()
-    processed = run_outbox_worker_once(session, client, intent.due_at)
+    processed = run_outbox_worker_once(session, client, intent.due_at, "worker_1")
 
     assert processed[0].status == "done"
     assert client.calls == []  # no real API call for a simulated action

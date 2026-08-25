@@ -58,7 +58,7 @@ def test_intent_with_due_at_in_the_future_is_not_picked_up():
 
     # now, now+1hr, now+3h59m -- all still before due_at.
     for elapsed in (timedelta(0), timedelta(hours=1), timedelta(hours=3, minutes=59)):
-        processed = run_outbox_worker_once(session, client, now + elapsed)
+        processed = run_outbox_worker_once(session, client, now + elapsed, "worker_1")
         assert processed == [], elapsed
 
     assert client.calls == []
@@ -82,10 +82,10 @@ def test_same_intent_is_picked_up_once_now_passes_due_at():
     client = FakeRazorpayClient()
 
     # Not due yet at exactly one second before due_at.
-    assert run_outbox_worker_once(session, client, due_at - timedelta(seconds=1)) == []
+    assert run_outbox_worker_once(session, client, due_at - timedelta(seconds=1), "worker_1") == []
 
     # Due exactly AT due_at (<=, not <).
-    processed = run_outbox_worker_once(session, client, due_at)
+    processed = run_outbox_worker_once(session, client, due_at, "worker_1")
     assert len(processed) == 1
     assert processed[0].status == "done"
     assert len(client.calls) == 1
@@ -108,7 +108,7 @@ def test_default_due_at_is_event_time_for_backward_compatible_callers():
         # no due_at passed
     )
     client = FakeRazorpayClient()
-    processed = run_outbox_worker_once(session, client, now)
+    processed = run_outbox_worker_once(session, client, now, "worker_1")
     assert len(processed) == 1
 
 

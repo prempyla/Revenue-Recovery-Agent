@@ -167,7 +167,7 @@ def _customer_facing_payment(payment_id, failed_at):
 def _diagnose_schedule_and_dispatch(session, payment, client, policy_fn):
     intent = diagnose_and_schedule(session, payment, PERSONA, payment.failed_at, policy_fn=policy_fn)
     assert intent is not None
-    run_outbox_worker_once(session, client, intent.due_at)
+    run_outbox_worker_once(session, client, intent.due_at, "worker_1")
     return intent
 
 

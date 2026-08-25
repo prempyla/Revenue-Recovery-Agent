@@ -191,6 +191,14 @@ On top of those three, a fourth, larger gap: `full_agent` — the actual cost-aw
 
 ---
 
+## A misplaced edit split a DECISIONS.md entry in half
+
+Minor. While starting the P1 worker-lease task, inserting the timezone-fix entry into `DECISIONS.md` (commit `953278a`) matched the anchor text mid-entry instead of at the true end of the opt-out entry it was following — its closing "fourth instance of the family" paragraph (four numbered points plus "The rule, extended") got separated from its own entry and stranded after the timezone entry's "Not touched, per instruction: the lease and circuit breaker" line, instead of staying attached to the opt-out write-up it belonged to. Nothing was lost — both halves were still in the file, just in the wrong order, discovered by rereading the file before adding the lease entry rather than by any test (`DECISIONS.md` isn't executable). Fixed by moving the stranded paragraph back to sit immediately after the opt-out entry, before the timezone entry, restoring true chronological order. No commit hash of its own — folded into the P1 #2 (worker lease) commit alongside the intended DECISIONS.md addition.
+
+**Why it's worth a line and not more:** low stakes (a prose doc, not code — nothing tested it and nothing depended on its order at runtime), but it's a concrete reminder that `old_string`/`new_string` edits anchored on a substring need the substring to be unambiguous about *where the insertion point actually is*, not just present in the file — a match that's technically correct can still land in the middle of a logical unit if that unit doesn't end where the anchor text does.
+
+---
+
 ## The recurring pattern
 
 Four separate incidents across this build share one exact shape, found roughly three weeks apart in build time but structurally identical each time: **the system's behavior was correct, but the reason recorded for that behavior was false, or nothing was recorded at all.** This matters specifically because the audit trail here is append-only by design (see DECISIONS.md's original architecture decision) — the entire point of that choice is that "what actually happened" should be provable from the log rather than trusted on faith. Each of these four incidents is a way that guarantee can quietly fail without any single line in the log being individually wrong.

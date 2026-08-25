@@ -23,12 +23,32 @@ primitive wired up, and is dispatched as a LOGGED SIMULATED SEND instead —
 explicitly tagged `simulated: True` in the result/audit payload, never
 presented as a real send. An action_type genuinely outside this set still
 raises NotImplementedError, unchanged from before.
+
+Worker lease (2026-08-25 P1 #2, DECISIONS.md): before this, run_outbox_
+worker_once's SELECT of pending+due rows had no claim step at all. Two
+concurrent worker processes would both fetch the same rows and both
+execute them — Razorpay's reference_id uniqueness would catch the
+resulting duplicate as an ERROR after the fact, not prevent it. claimed_by
+/claimed_until turn "fetch pending rows" into "atomically claim a batch,
+then only process what was actually won": _claim_batch's UPDATE ... WHERE
+re-checks eligibility (status="pending" AND due_at<=now AND
+(claimed_until IS NULL OR claimed_until < now)) as part of the same
+statement that sets the claim, so a row a concurrent writer already
+claimed simply matches zero rows here instead of being claimed twice.
+SQLite's own coarse, single-writer-at-a-time locking is what makes this
+straightforward to implement correctly with a plain conditional UPDATE;
+on Postgres the equivalent (and the mechanism this is deliberately
+mirroring, not reinventing) is `SELECT ... FOR UPDATE SKIP LOCKED`. An
+expired lease (claimed_until < now, e.g. a worker that claimed a batch
+and then crashed) is reclaimable by a later call — the dead-worker
+recovery case, and the one that actually justifies a lease *expiry*
+rather than a permanent claim.
 """
 
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import List, Optional
 
-from sqlalchemy import JSON, Integer, String
+from sqlalchemy import JSON, Integer, String, or_, update
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .clock import UTCDateTime
@@ -43,6 +63,17 @@ from .states import AbandonReason, PaymentState
 SIMULATED_ACTION_TYPES = frozenset(
     {"retry_now", "retry_scheduled", "send_nudge", "send_instrument_update_link", "escalate_alternate_instrument"}
 )
+
+# ASSUMPTION: ungiven. Generous relative to how long a single dispatch
+# (one Razorpay call or one logged simulated send) actually takes, so a
+# live worker's own claim never expires out from under it mid-batch; short
+# enough that a genuinely dead worker's claims become reclaimable well
+# before anyone would notice the delay.
+DEFAULT_LEASE_DURATION = timedelta(minutes=5)
+
+# ASSUMPTION: ungiven. Bounded so one worker claiming a batch can't starve
+# every other concurrent worker out of the entire pending set indefinitely.
+DEFAULT_CLAIM_BATCH_SIZE = 50
 
 
 class OutboxIntent(Base):
@@ -59,6 +90,8 @@ class OutboxIntent(Base):
     executed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    claimed_until: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
 
 
 def write_intent_with_state_change(
@@ -128,25 +161,79 @@ _DISPATCH = {
 }
 
 
-def run_outbox_worker_once(
-    session: Session, client: RazorpayClientInterface, now: datetime
-) -> list[OutboxIntent]:
-    """Single pass: process every currently-pending, currently-DUE intent
-    (status="pending" AND due_at <= now). Rows not yet due are skipped, not
-    errored -- they'll be picked up by a later pass once due_at arrives.
-    `now` is a parameter, never read from the clock inside, same discipline
-    as decide(). Not a `while True` loop itself — that's what makes this
-    deterministic and testable; a real deployment wraps this in a poll loop
-    with a sleep."""
-    pending = (
+def _eligible_clause(now: datetime):
+    """status="pending" AND due_at <= now AND (claimed_until IS NULL OR
+    claimed_until < now) -- an unclaimed-or-lease-expired, currently-due,
+    still-pending row. Shared between the candidate SELECT and each claim
+    UPDATE's WHERE so both sides agree on what "eligible" means."""
+    return (
+        OutboxIntent.status == "pending",
+        OutboxIntent.due_at <= now,
+        or_(OutboxIntent.claimed_until.is_(None), OutboxIntent.claimed_until < now),
+    )
+
+
+def _claim_batch(
+    session: Session,
+    worker_id: str,
+    now: datetime,
+    lease_duration: timedelta,
+    batch_size: int,
+) -> List[OutboxIntent]:
+    """Atomically claims up to batch_size eligible intents for worker_id.
+    Portable equivalent of Postgres's SELECT ... FOR UPDATE SKIP LOCKED,
+    not a reinvention of it: SQLite has no such clause, but its coarse
+    single-writer-at-a-time locking means a plain conditional UPDATE is
+    enough to get the same guarantee. Each row's UPDATE re-checks
+    eligibility as part of the SAME statement that sets the claim, so if a
+    concurrent writer already claimed it between this function's candidate
+    SELECT and this specific UPDATE, the WHERE clause matches zero rows
+    here and the row is silently skipped rather than claimed twice --
+    checked via rowcount, not assumed. See module docstring for why the
+    lease has an EXPIRY rather than being a permanent claim (a crashed
+    worker's rows must eventually become reclaimable)."""
+    candidate_ids = [
+        row[0]
+        for row in session.query(OutboxIntent.id)
+        .filter(*_eligible_clause(now))
+        .order_by(OutboxIntent.id)
+        .limit(batch_size)
+        .all()
+    ]
+
+    lease_expiry = now + lease_duration
+    claimed_ids = []
+    for intent_id in candidate_ids:
+        result = session.execute(
+            update(OutboxIntent)
+            .where(OutboxIntent.id == intent_id, *_eligible_clause(now))
+            .values(claimed_by=worker_id, claimed_until=lease_expiry)
+        )
+        if result.rowcount == 1:
+            claimed_ids.append(intent_id)
+    session.commit()
+
+    if not claimed_ids:
+        return []
+    return (
         session.query(OutboxIntent)
-        .filter(OutboxIntent.status == "pending", OutboxIntent.due_at <= now)
+        .filter(OutboxIntent.id.in_(claimed_ids))
         .order_by(OutboxIntent.id)
         .all()
     )
+
+
+def _process_claimed_intents(
+    session: Session, client: RazorpayClientInterface, now: datetime, claimed: List[OutboxIntent]
+) -> List[OutboxIntent]:
+    """Executes exactly the intents this worker already won via
+    _claim_batch -- split out from run_outbox_worker_once specifically so
+    a test can interleave two workers' claim calls before either one
+    processes anything, which is the actual race window a lease exists to
+    close (see tests/test_execution_outbox_lease.py)."""
     processed = []
 
-    for intent in pending:
+    for intent in claimed:
         # Commit the EXECUTING transition BEFORE calling the API: if the
         # process crashes during the call, the payment is visibly stuck in
         # EXECUTING (a known gap this round — that's what the excluded
@@ -195,3 +282,25 @@ def run_outbox_worker_once(
         processed.append(intent)
 
     return processed
+
+
+def run_outbox_worker_once(
+    session: Session,
+    client: RazorpayClientInterface,
+    now: datetime,
+    worker_id: str,
+    lease_duration: timedelta = DEFAULT_LEASE_DURATION,
+    batch_size: int = DEFAULT_CLAIM_BATCH_SIZE,
+) -> list[OutboxIntent]:
+    """Single pass: claim a batch of currently-pending, currently-DUE,
+    currently-unclaimed-or-lease-expired intents for worker_id, then
+    process only what was actually claimed. Rows not yet due, or already
+    claimed by a live lease, are skipped, not errored -- they'll be picked
+    up by a later pass (this worker or another) once due_at arrives or the
+    lease expires. `now` and `worker_id` are both parameters, never read
+    from the clock or generated inside, same discipline as decide(). Not a
+    `while True` loop itself — that's what makes this deterministic and
+    testable; a real deployment wraps this in a poll loop with a sleep and
+    a real worker identity (hostname+pid, a UUID, etc.)."""
+    claimed = _claim_batch(session, worker_id, now, lease_duration, batch_size)
+    return _process_claimed_intents(session, client, now, claimed)
