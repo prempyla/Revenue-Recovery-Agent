@@ -6,7 +6,7 @@ from datetime import datetime
 import pytest
 
 from execution.db import make_engine, make_session_factory
-from execution.eventlog import append_event, derive_state
+from execution.eventlog import append_event, derive_state, history
 from execution.idempotency import make_idempotency_key
 from execution.outbox import OutboxIntent, run_outbox_worker_once, write_intent_with_state_change
 from execution.razorpay_client import FakeRazorpayClient
@@ -77,15 +77,45 @@ def test_intent_survives_a_simulated_crash_between_persist_and_execute(tmp_path)
 
 
 def test_unmapped_action_type_raises_not_implemented():
+    """2026-08-25: retry_now (the previous example here) is now dispatched
+    as a logged simulated send -- see SIMULATED_ACTION_TYPES -- so it no
+    longer demonstrates "unmapped". Using a genuinely fictional action_type
+    instead; every real ActionType enum value is now covered by _DISPATCH."""
     session = _session()
     now = datetime(2026, 1, 1)
     _to_diagnosed(session, "pay_x", now)
     write_intent_with_state_change(
-        session, "pay_x", make_idempotency_key("pay_x", 1), "retry_now", {}, now
+        session, "pay_x", make_idempotency_key("pay_x", 1), "teleport_customer", {}, now
     )
     client = FakeRazorpayClient()
     with pytest.raises(NotImplementedError):
         run_outbox_worker_once(session, client, now)
+
+
+def test_simulated_action_types_are_dispatched_without_a_real_api_call():
+    """2026-08-25 fix: action types with no real Razorpay primitive (e.g.
+    retry_now) are executed as a logged simulated send, explicitly tagged,
+    never a real create_payment_link-style call."""
+    from execution.outbox import SIMULATED_ACTION_TYPES
+
+    for action_type in SIMULATED_ACTION_TYPES:
+        session = _session()
+        now = datetime(2026, 1, 1)
+        _to_diagnosed(session, "pay_x", now)
+        write_intent_with_state_change(
+            session, "pay_x", make_idempotency_key("pay_x", 1), action_type, {}, now
+        )
+        client = FakeRazorpayClient()
+
+        processed = run_outbox_worker_once(session, client, now)
+
+        assert client.calls == [], f"{action_type}: must not make a real API call"
+        assert processed[0].status == "done"
+        assert processed[0].result["simulated"] is True
+        assert processed[0].result["action_type"] == action_type
+        assert derive_state(session, "pay_x") == PaymentState.AWAITING_CONFIRMATION
+        last_event = history(session, "pay_x")[-1]
+        assert last_event.payload["simulated"] is True
 
 
 def test_execution_error_marks_abandoned_with_execution_error_reason():

@@ -50,7 +50,11 @@ def test_full_path_ends_in_recovered_when_webhook_confirms_payment():
     assert derive_state(session, "pay_e2e") == PaymentState.SCHEDULED
 
     client = FakeRazorpayClient()
-    processed = run_outbox_worker_once(session, client, now)
+    # 2026-08-25: rules_only's INSUFFICIENT_FUNDS offset is 1 hour -- the
+    # worker must be polled with a `now` past due_at, not the same `now`
+    # the intent was scheduled at, or it's correctly skipped as not-yet-due.
+    worker_now = intent.due_at
+    processed = run_outbox_worker_once(session, client, worker_now)
     assert processed[0].status == "done"
     assert derive_state(session, "pay_e2e") == PaymentState.AWAITING_CONFIRMATION
 
@@ -64,7 +68,7 @@ def test_full_path_ends_in_recovered_when_webhook_confirms_payment():
             "payment_link": {"entity": {"reference_id": intent.idempotency_key, "id": processed[0].result["id"]}}
         },
     }
-    process_webhook_event(session, webhook_payload, now)
+    process_webhook_event(session, webhook_payload, worker_now)
 
     assert derive_state(session, "pay_e2e") == PaymentState.RECOVERED
     assert [e.to_state for e in history(session, "pay_e2e")] == [
@@ -83,13 +87,21 @@ def test_full_path_ends_in_abandoned_when_webhook_reports_expiry():
 
     intent = diagnose_and_schedule(session, PAYMENT, PERSONA, now)
     client = FakeRazorpayClient()
-    run_outbox_worker_once(session, client, now)
+    # See the recovered-path test above: must poll the worker past due_at,
+    # not at the scheduling time, or this test degenerates into checking a
+    # SCHEDULED->ABANDONED transition that never actually went through the
+    # worker at all (still legal per the FSM, but not what this test claims
+    # to exercise).
+    worker_now = intent.due_at
+    processed = run_outbox_worker_once(session, client, worker_now)
+    assert processed[0].status == "done"
+    assert derive_state(session, "pay_e2e") == PaymentState.AWAITING_CONFIRMATION
 
     webhook_payload = {
         "event": "payment_link.expired",
         "payload": {"payment_link": {"entity": {"reference_id": intent.idempotency_key}}},
     }
-    process_webhook_event(session, webhook_payload, now)
+    process_webhook_event(session, webhook_payload, worker_now)
 
     assert derive_state(session, "pay_e2e") == PaymentState.ABANDONED
     last_event = history(session, "pay_e2e")[-1]
