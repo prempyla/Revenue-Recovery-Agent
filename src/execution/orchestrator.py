@@ -76,7 +76,24 @@ def diagnose_and_schedule(
         payment.payment_id,
         PaymentState.DIAGNOSED,
         now,
-        payload={"decline_reason": payment.decline_reason.value},
+        # 2026-08-25: previously only decline_reason. customer_id,
+        # amount_paise, instrument_type, and issuer_code were never
+        # persisted anywhere in the execution event log at all, despite
+        # being required fields on simulator.types.Payment (no defaults) --
+        # a real schema gap, found while building query_layer.py's
+        # recent_failures(), which needs to reconstruct a full Payment from
+        # this log. Closed here rather than worked around: these are facts
+        # orchestrator.py already has in hand at diagnosis time, and this is
+        # the natural place they belong, not a new mechanism. failed_at
+        # isn't stored again — the AT_RISK event's own event_time already
+        # serves that purpose (see query_layer.py's DECISIONS.md entry).
+        payload={
+            "decline_reason": payment.decline_reason.value,
+            "customer_id": payment.customer_id,
+            "amount_paise": payment.amount_paise,
+            "instrument_type": payment.instrument_type.value,
+            "issuer_code": payment.issuer_code,
+        },
     )
     session.commit()
 
