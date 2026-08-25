@@ -217,6 +217,26 @@ Minor. While starting the P1 worker-lease task, inserting the timezone-fix entry
 
 ---
 
+## The ramped outage resume made the numbers worse, and the reason was a real architectural mismatch
+
+**Stage:** Building P1 #3 (the last of three P1 fixes) — jittered, ramped release for payments held during a detected issuer outage, replacing a fixed hold offset that made every held payment retry at the same instant once the outage cleared.
+
+**What broke:** Nothing in the mechanism itself — a named circuit breaker (`closed`/`open`/`half_open`, derived fresh from the failure log, never a stored flag) and deterministic jitter, exactly as specified, verified correct by 9 passing tests including proof-of-load-bearing (reverting the jitter or the ramp-bucket fractions and confirming the relevant tests fail). But re-running the 3-seed harness comparison — done because the task explicitly asked whether the numbers would move — showed `full_agent`'s ₹/contact and total recovered dropping by a consistent ~4% on every seed, and its margin over the outage-detection ablation shrinking from roughly +11–15% to +7–10%. The mechanism worked exactly as built; the *net effect* on this simulator's numbers was a real decrease, not the improvement a "smarter release schedule" would suggest.
+
+**Why it was dangerous:** Not a runtime failure — a silent, plausible-looking regression in the exact metric the whole project's pitch depends on (₹/contact). Reporting the new numbers without diagnosing *why* they moved would have meant handing over a table that looked like a step backward, with no explanation, on the eve of recording the pitch video. Worse, without digging in, the natural (wrong) conclusion would have been "the circuit breaker doesn't help" — when what actually happened is a specific, fixable mismatch between the mechanism's assumptions and this harness's architecture, not a flaw in the mechanism's own logic.
+
+**How I found it:** Instrumented one seed's held-payment cohort directly rather than guessing from the aggregate numbers: of 25 payments held for a detected outage, 11 got an early release opportunity (probe or ramp checkpoint confirmed the breaker `CLOSED`) instead of the conservative fallback — but checking those 11 against the simulator's own ground-truth `outage_events` (not the detector's belief) showed only 2 actually landed after the true outage had ended; the other 9 landed while it was still genuinely live, guaranteeing a wasted, zero-probability attempt.
+
+**The root cause:** The circuit breaker's `CLOSED` verdict is derived from the failure log — i.e., from *other* customers' observed failures thinning out — and this simulator's true-outage generation deliberately front-loads its failure signal into the first ~20 minutes (see the front-loaded-burst fix, an earlier incident in this log). So the detector often reads "clear" well before the true outage's full duration has actually elapsed. A real system would treat a failed early probe as informative and simply try again on the next cycle. This simulator's harness calls `decide()` exactly once per payment, with no retry-on-failure loop — so a probe landing during a still-live outage isn't "informative," it's a permanent loss. The circuit breaker pattern assumes a system that can retry a failed probe; this harness's one-shot-per-payment architecture can't, and that mismatch, not a bug in the breaker's own code, is what moved the numbers.
+
+**The fix:** None applied — reported, not silently resolved, per the task's explicit instruction to report honestly rather than tune toward a target number. The mechanism is correct and does fix the thundering-herd problem it was built for; whether to anchor the probe/ramp checkpoints more conservatively (trading away some early-release benefit for less wasted-probe risk) is a genuine follow-up decision, flagged for the next round rather than made unilaterally in this one. `DECISIONS.md` carries the full before/after table.
+
+**Lesson:** A textbook pattern (circuit breaker, probe-then-widen) carries assumptions about the system it's dropped into — specifically here, that a failed probe gets a next attempt — and those assumptions don't announce themselves; they only surface by actually measuring the pattern's effect against the target metric, not by trusting that "this is a solved, well-known mechanism" is enough on its own.
+
+**Video line:** Our smarter outage-recovery logic actually made the numbers worse at first — turns out our own simulator can't retry a failed probe, so an early guess that's wrong is a total loss, not a lesson learned.
+
+---
+
 ## The recurring pattern
 
 Four separate incidents across this build share one exact shape, found roughly three weeks apart in build time but structurally identical each time: **the system's behavior was correct, but the reason recorded for that behavior was false, or nothing was recorded at all.** This matters specifically because the audit trail here is append-only by design (see DECISIONS.md's original architecture decision) — the entire point of that choice is that "what actually happened" should be provable from the log rather than trusted on faith. Each of these four incidents is a way that guarantee can quietly fail without any single line in the log being individually wrong.

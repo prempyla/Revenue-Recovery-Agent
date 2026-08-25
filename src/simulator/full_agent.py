@@ -38,8 +38,10 @@ weekly-cap and opt-out checks collapse into one conservative mechanism here
 rather than two independently precise ones.
 """
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import config
@@ -96,6 +98,136 @@ DEFAULT_CHANNEL = {
     ActionType.SEND_NUDGE: Channel.WHATSAPP,
 }
 
+# --- P1 #3 (2026-08-25, DECISIONS.md): jitter + circuit breaker ---
+#
+# Before this, every payment held for a detected ISSUER_DOWN outage was
+# scheduled at the exact same fixed hold_offset -- so when an outage
+# cleared, every held payment retried at roughly the same instant: a
+# thundering herd against a bank that had just come back up. Two fixes,
+# composed:
+#
+# 1. Deterministic jitter, spreading release instants out. Must be a pure
+#    function of (payment_id, attempt_number) -- same reasoning as
+#    idempotency.make_idempotency_key -- so decide() stays replayable: the
+#    same inputs must always produce the same jittered offset, which rules
+#    out Python's `random` module (a fresh value per call would make
+#    decide() non-reproducible for identical arguments).
+#
+# 2. A circuit breaker (named that on purpose -- this is a solved,
+#    textbook problem, not something invented here), with the standard
+#    closed / open / half_open states. OPEN while the detector says the
+#    outage is active. HALF_OPEN for a confirmation window immediately
+#    after it stops being active -- not yet trusted long enough to be
+#    "recovered", just "not currently failing". CLOSED once it's stayed
+#    clear for a full confirmation window. State is derived fresh from
+#    failure_log on every call via circuit_breaker_state() below, exactly
+#    like detect_systemic_event() itself -- no mutable flag anywhere.
+#
+# Composing the two: rather than everyone waiting the full conservative
+# ASSUMED_MAX_OUTAGE_DURATION_MINUTES, a small deterministic fraction of
+# held payments ("probes") get a chance at an EARLIER release, gated on
+# the breaker having reached CLOSED (not just HALF_OPEN -- one confirmed
+# clear window isn't enough confidence to release on its own) by that
+# earlier time. A second, wider fraction ("ramp") gets a chance at a
+# second, later checkpoint. Everyone else -- and anyone whose probe/ramp
+# checkpoint found the breaker not yet CLOSED, i.e. "probes failed" --
+# falls through to the original, fully conservative fallback time,
+# unchanged from before this fix. This is what "reopens rather than
+# widens" means operationally here: a checkpoint that finds the breaker
+# still OPEN or only HALF_OPEN does not release early, it defers to the
+# next, more conservative checkpoint instead.
+#
+# ASSUMPTIONS, all ungiven by the task: the specific fractions and window
+# width below. Chosen illustratively, not tuned against a target number.
+HOLD_JITTER_MAX_MINUTES = 15
+CIRCUIT_BREAKER_WINDOW_MINUTES = 15  # width of the half-open confirmation window and of one ramp stage
+CIRCUIT_BREAKER_PROBE_FRACTION = 0.1  # fraction of held payments given a shot at the earliest checkpoint
+CIRCUIT_BREAKER_RAMP_FRACTION = 0.5  # cumulative fraction (including probes) given a shot at the second checkpoint
+
+
+class CircuitBreakerState(str, Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+def circuit_breaker_state(
+    failure_log: Sequence[Payment],
+    issuer_code: str,
+    at: datetime,
+    detector_config: OutageDetectorConfig,
+) -> CircuitBreakerState:
+    """Derived fresh from failure_log every call, never stored: OPEN if
+    detect_systemic_event says the outage is active AT `at`. HALF_OPEN if
+    it isn't active at `at` but WAS active within the trailing
+    CIRCUIT_BREAKER_WINDOW_MINUTES -- recently cleared, not yet confirmed
+    stable. CLOSED once it's been clear for at least that long. Same
+    (failure_log, issuer_code, at, config) always yields the same answer,
+    same replay-from-arguments discipline as detect_systemic_event()
+    itself."""
+    if detect_systemic_event(failure_log, issuer_code, at, detector_config):
+        return CircuitBreakerState.OPEN
+    recently = at - timedelta(minutes=CIRCUIT_BREAKER_WINDOW_MINUTES)
+    if detect_systemic_event(failure_log, issuer_code, recently, detector_config):
+        return CircuitBreakerState.HALF_OPEN
+    return CircuitBreakerState.CLOSED
+
+
+def _deterministic_unit_interval(salt: str, payment_id: str, attempt_number: int) -> float:
+    """Pseudo-random value in [0, 1), deterministic given
+    (salt, payment_id, attempt_number). A SHA-256 hash rather than
+    Python's `random` module for the same reason idempotency keys are
+    derived, not random: decide() must return the SAME answer for the
+    same inputs, every time it's replayed. Different `salt` strings give
+    independent-looking outputs for different purposes from the same
+    (payment_id, attempt_number) -- e.g. this payment's jitter offset and
+    its circuit-breaker ramp bucket shouldn't be correlated with each
+    other just because they're hashed from the same identity."""
+    digest = hashlib.sha256(f"{salt}:{payment_id}:{attempt_number}".encode()).digest()
+    return int.from_bytes(digest, "big") / (2 ** (8 * len(digest)))
+
+
+def _deterministic_jitter(payment_id: str, attempt_number: int, max_jitter: timedelta) -> timedelta:
+    fraction = _deterministic_unit_interval("jitter", payment_id, attempt_number)
+    return timedelta(seconds=fraction * max_jitter.total_seconds())
+
+
+def _issuer_down_release_offset(
+    payment: Payment,
+    failure_log: Sequence[Payment],
+    detector_config: OutageDetectorConfig,
+    attempt_number: int,
+) -> timedelta:
+    """When to release a payment held for a detected ISSUER_DOWN outage.
+    Three deterministic checkpoints, cascading from earliest/riskiest to
+    latest/safest; every payment ends up with exactly one release offset,
+    computed in this one call -- no live re-evaluation loop, consistent
+    with decide() being called once per diagnosis. See the module-level
+    note above for the full reasoning."""
+    hysteresis_clear_minutes = detector_config.window_minutes + detector_config.cooldown_minutes
+    probe_offset = timedelta(minutes=hysteresis_clear_minutes)
+    ramp_offset = timedelta(minutes=hysteresis_clear_minutes + CIRCUIT_BREAKER_WINDOW_MINUTES)
+    fallback_offset = timedelta(minutes=hysteresis_clear_minutes + ASSUMED_MAX_OUTAGE_DURATION_MINUTES)
+
+    bucket = _deterministic_unit_interval("ramp_bucket", payment.payment_id, attempt_number)
+    jitter = _deterministic_jitter(payment.payment_id, attempt_number, timedelta(minutes=HOLD_JITTER_MAX_MINUTES))
+
+    checkpoints = []
+    if bucket < CIRCUIT_BREAKER_PROBE_FRACTION:
+        checkpoints.append(probe_offset)
+    if bucket < CIRCUIT_BREAKER_RAMP_FRACTION:
+        checkpoints.append(ramp_offset)
+
+    for offset in checkpoints:
+        candidate_time = payment.failed_at + offset
+        if circuit_breaker_state(failure_log, payment.issuer_code, candidate_time, detector_config) == CircuitBreakerState.CLOSED:
+            return offset + jitter
+        # Still OPEN or only HALF_OPEN at this checkpoint -- "probes
+        # failed": don't release here, fall through to the next,
+        # more conservative checkpoint rather than widening anyway.
+
+    return fallback_offset + jitter
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -114,6 +246,7 @@ def _candidates_for(
     outage_events: Sequence[OutageEvent],
     detector_config: OutageDetectorConfig,
     disable_outage_detection: bool,
+    attempt_number: int,
 ) -> List[Candidate]:
     category = payment.decline_reason
 
@@ -133,8 +266,16 @@ def _candidates_for(
             failure_log, payment.issuer_code, prospective_time, detector_config
         )
         if outage_in_progress:
-            # Hold: schedule past ASSUMED_MAX_OUTAGE_DURATION_MINUTES, not
-            # just the detector's own window+cooldown. Those two alone
+            # Hold, with jitter + a ramped circuit-breaker release schedule
+            # (P1 #3, 2026-08-25 DECISIONS.md) instead of one fixed instant
+            # for every held payment -- see _issuer_down_release_offset and
+            # the module-level note above it for the full reasoning. The
+            # fallback checkpoint inside it is still anchored past
+            # ASSUMED_MAX_OUTAGE_DURATION_MINUTES, preserving the original
+            # safety margin (see its own history below) for whichever
+            # payments' earlier checkpoints don't confirm CLOSED.
+            #
+            # Original margin reasoning, unchanged: window+cooldown alone
             # (15+15=30min) sound like a reasonable buffer but aren't -- an
             # outage lasting up to ~90 minutes (this simulator's true_outage
             # duration; a real policy would have its own aggregate belief
@@ -146,13 +287,11 @@ def _candidates_for(
             # ZERO measurable outcome difference from full_agent, because
             # both the held and un-held retry times landed inside the same
             # still-active outage window. See DECISIONS.md 2026-08-25.
-            hold_offset = timedelta(
-                minutes=detector_config.window_minutes
-                + detector_config.cooldown_minutes
-                + ASSUMED_MAX_OUTAGE_DURATION_MINUTES
-            )
+            release_offset = _issuer_down_release_offset(payment, failure_log, detector_config, attempt_number)
             return [
-                Candidate(hold_offset, Action(ActionType.RETRY_SCHEDULED), ISSUER_DOWN_RATE_HOLDING_FOR_RECOVERY)
+                Candidate(
+                    release_offset, Action(ActionType.RETRY_SCHEDULED), ISSUER_DOWN_RATE_HOLDING_FOR_RECOVERY
+                )
             ]
         return [
             Candidate(
@@ -248,12 +387,24 @@ def decide(
     outage_events: Sequence[OutageEvent],
     detector_config: OutageDetectorConfig = DEFAULT_DETECTOR_CONFIG,
     disable_outage_detection: bool = False,
+    attempt_number: int = 1,
 ) -> Optional[Tuple[timedelta, Action]]:
     """Pure: no I/O, no clock reads -- now/tracker/failure_log/outage_events
     are all explicit arguments. Returns the winning (offset, Action), or
     None if STOP wins (every candidate was vetoed, or none beat STOP's
-    implicit score of 0)."""
-    candidates = _candidates_for(payment, failure_log, outage_events, detector_config, disable_outage_detection)
+    implicit score of 0).
+
+    attempt_number (P1 #3, 2026-08-25 DECISIONS.md): feeds the ISSUER_DOWN
+    jitter/circuit-breaker release schedule -- same reasoning as
+    idempotency.make_idempotency_key's (payment_id, attempt_number) pair.
+    Defaults to 1 so every pre-existing caller keeps behaving exactly as
+    before (this simulator's harness never re-evaluates the same payment
+    through full_agent more than once per run, so attempt_number is always
+    1 there; it only varies for callers -- e.g. a live execution/
+    orchestration loop -- that genuinely re-diagnose the same payment)."""
+    candidates = _candidates_for(
+        payment, failure_log, outage_events, detector_config, disable_outage_detection, attempt_number
+    )
 
     best: Optional[Candidate] = None
     best_score = 0.0  # STOP's score: zero cost, zero revenue
@@ -276,12 +427,23 @@ def make_full_agent_policy(
     failure_log: Sequence[Payment],
     outage_events: Sequence[OutageEvent],
     disable_outage_detection: bool = False,
+    attempt_number: int = 1,
 ) -> Callable[[ContactTracker], Callable[[Payment, Customer], Plan]]:
     """Factory returning a (tracker) -> policy_fn closure, so the harness can
     hand full_agent the SAME ContactTracker instance it's using for the rest
     of the run (see harness.run_policy's is_factory path) -- decide() needs
     that tracker for its compliance vetoes, and the plain
     (payment, customer) -> Plan policies don't need or get one.
+
+    attempt_number (P1 #3, 2026-08-25 DECISIONS.md) is bound at FACTORY
+    construction time, not per payment: the harness constructs one factory
+    instance and reuses it across an entire batch of different payments
+    (every one of them a genuine first attempt, so the default of 1 is
+    correct there); a caller that's re-diagnosing the SAME payment on a
+    later attempt (e.g. execution/'s orchestrator, which already tracks
+    its own attempt_number per diagnose_and_schedule call) constructs a
+    fresh factory with the right attempt_number for that one call, the
+    same pattern already used for failure_log/outage_events/tracker.
     """
 
     def with_tracker(tracker: ContactTracker) -> Callable[[Payment, Customer], Plan]:
@@ -294,6 +456,7 @@ def make_full_agent_policy(
                 failure_log,
                 outage_events,
                 disable_outage_detection=disable_outage_detection,
+                attempt_number=attempt_number,
             )
             return [decision] if decision is not None else []
 
