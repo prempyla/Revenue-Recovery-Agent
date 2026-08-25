@@ -43,6 +43,24 @@ expired lease (claimed_until < now, e.g. a worker that claimed a batch
 and then crashed) is reclaimable by a later call — the dead-worker
 recovery case, and the one that actually justifies a lease *expiry*
 rather than a permanent claim.
+
+NOT a perfect equivalent to FOR UPDATE SKIP LOCKED, and worth being
+honest about the gap (found by deliberately stress-testing the mechanism
+after it shipped, not assumed away -- see DECISIONS.md): a Postgres row
+lock is held for the life of the transaction, so a live-but-slow worker
+never loses it just because time passed. This lease is time-based, not
+transaction-based -- if one worker's actual processing (the handler call,
+a real network round-trip in production) takes longer than
+lease_duration, a second worker can correctly reclaim the row believing
+the first is dead, when it's actually just slow. _process_claimed_intents
+below catches this specific case: the stale worker's own
+append_event(EXECUTING) on a row another worker has already moved past
+EXECUTING raises IllegalStateTransition (the FSM's own transition
+validation is the actual backstop that prevents a genuine second Razorpay
+call here, not the lease alone) -- caught, and that one intent is skipped
+rather than crashing the rest of the stale worker's batch. The real
+mitigation is sizing DEFAULT_LEASE_DURATION comfortably above realistic
+processing time, same as any lease-based system.
 """
 
 from datetime import datetime, timedelta
@@ -55,7 +73,7 @@ from .clock import UTCDateTime
 from .db import Base
 from .eventlog import append_event
 from .razorpay_client import RazorpayClientInterface
-from .states import AbandonReason, PaymentState
+from .states import AbandonReason, IllegalStateTransition, PaymentState
 
 # action_types with no real Razorpay test-mode primitive behind them yet --
 # dispatched as a logged simulated send (see _execute_simulated_action)
@@ -230,7 +248,19 @@ def _process_claimed_intents(
     _claim_batch -- split out from run_outbox_worker_once specifically so
     a test can interleave two workers' claim calls before either one
     processes anything, which is the actual race window a lease exists to
-    close (see tests/test_execution_outbox_lease.py)."""
+    close (see tests/test_execution_outbox_lease.py).
+
+    Found by deliberately stress-testing the lease after it shipped, not
+    requested: this worker's OWN claim can be stale by the time it gets
+    here -- if it took longer than lease_duration to work through an
+    earlier intent in this same batch, a second worker may have correctly
+    (from ITS perspective) reclaimed and already finished a later one.
+    That shows up here as append_event(EXECUTING) raising
+    IllegalStateTransition, since the payment has already moved past
+    EXECUTING under the other worker. Caught below: skip that one stale
+    intent (never call the handler for it -- no second real dispatch) and
+    keep processing the rest of this worker's batch, rather than one
+    reclaimed row taking down the whole pass with an unhandled exception."""
     processed = []
 
     for intent in claimed:
@@ -238,8 +268,15 @@ def _process_claimed_intents(
         # process crashes during the call, the payment is visibly stuck in
         # EXECUTING (a known gap this round — that's what the excluded
         # reconciliation poller is for) rather than silently lost.
-        append_event(session, intent.payment_id, PaymentState.EXECUTING, now)
-        session.commit()
+        try:
+            append_event(session, intent.payment_id, PaymentState.EXECUTING, now)
+            session.commit()
+        except IllegalStateTransition:
+            # Lost this one to another worker after our claim went stale
+            # -- see module docstring. Nothing was added to the session
+            # (validate_transition raises before the event is constructed),
+            # so there's nothing to roll back; just don't process it.
+            continue
 
         handler = _DISPATCH.get(intent.action_type)
         if handler is None:

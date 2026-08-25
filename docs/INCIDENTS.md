@@ -199,6 +199,24 @@ Minor. While starting the P1 worker-lease task, inserting the timezone-fix entry
 
 ---
 
+## The worker lease's own real limitation, found by stress-testing it after it shipped
+
+**Stage:** Right after the P1 #2 worker-lease commit landed, all tests green — asked directly "is it done right?" instead of taking the existing test suite's word for it.
+
+**What broke:** Nothing, under any of the tests already written — every one of them simulates concurrency sequentially, calling the claim step from two "workers" one after another in the same thread. That's a real test of the claim mechanism's atomicity, but it can't surface a different class of problem: what happens when a worker's actual *processing* (not just its claim) takes longer than its own lease. Constructing that scenario deliberately — one worker claims an intent, a second worker's clock check happens after the lease would have expired and correctly (from its own perspective) reclaims and finishes the row first, then the first worker, still alive and simply slow, finally gets around to processing what it claimed originally — surfaced that its belated `append_event(EXECUTING)` call raised an *uncaught* `IllegalStateTransition`, since the payment had already moved past `EXECUTING` under the worker that got there first.
+
+**Why it was dangerous:** The exception wasn't caught anywhere in the processing loop, so it would propagate out of `_process_claimed_intents` and abort the rest of that worker's entire claimed batch — not just the one stale intent, every other legitimate intent that same worker had also claimed in that pass. In a real deployment's poll loop, this is the shape of a rare-but-real crash: it requires actual processing to outrun the lease duration, which won't happen on every pass, but will happen eventually under real load (a slow network call, GC pause, a busy host) — and when it does, it doesn't just skip the one affected payment, it silently drops every other payment queued behind it in that worker's batch until the next poll.
+
+**How I found it:** Not a test failure — three rounds of deliberate adversarial verification after the feature already had 6 passing tests and had been reported as done: real OS threads (8, then 10) hammering a shared file-backed SQLite database with a deliberately too-short lease (down to 1 millisecond) to try to force the race under genuine concurrency first (it held — zero errors, zero double-executions), then a hand-constructed worst case specifically targeting the lease's known theoretical weak point (a live-but-slow worker, not a dead one) once the stress tests alone didn't reproduce anything.
+
+**The fix:** `_process_claimed_intents` now catches `IllegalStateTransition` specifically around the `EXECUTING` transition and skips that one intent — never reaches the dispatch handler, so no second real API call — while continuing to process the rest of its batch normally. The FSM's `validate_transition` was already doing the important work (genuinely preventing a second Razorpay call); the bug was in how the resulting exception propagated, not in the compliance check itself. Commit `9f9ba9f`'s follow-up (same PR/round). Documented as an explicit, permanent limitation in `outbox.py`'s docstring and `DECISIONS.md` — a time-based lease is not a perfect equivalent to Postgres's transaction-scoped `FOR UPDATE SKIP LOCKED`, and the honest mitigation is sizing the lease comfortably above realistic processing time, not a claim that this can never happen again.
+
+**Lesson:** A green test suite for a concurrency mechanism proves the scenarios that were written are handled — it doesn't mean the mechanism has no other failure modes, especially ones that only show up under genuine timing pressure a sequential test can't construct. When a fix specifically claims to approximate a known, different mechanism (here: Postgres's `FOR UPDATE SKIP LOCKED`), the differences between the approximation and the original are exactly where to go looking for what wasn't covered yet.
+
+**Video line:** After we shipped the lease, we didn't just trust our own tests — we threw ten real threads and a millisecond-long lease at it and found one more edge before anyone else could.
+
+---
+
 ## The recurring pattern
 
 Four separate incidents across this build share one exact shape, found roughly three weeks apart in build time but structurally identical each time: **the system's behavior was correct, but the reason recorded for that behavior was false, or nothing was recorded at all.** This matters specifically because the audit trail here is append-only by design (see DECISIONS.md's original architecture decision) — the entire point of that choice is that "what actually happened" should be provable from the log rather than trusted on faith. Each of these four incidents is a way that guarantee can quietly fail without any single line in the log being individually wrong.

@@ -225,3 +225,63 @@ def test_double_execution_occurs_without_the_claim_step_confirming_the_lease_is_
     claimed_a2 = outbox_module._claim_batch(session2, "worker_a", NOW, DEFAULT_LEASE_DURATION, batch_size=3)
     claimed_b2 = outbox_module._claim_batch(session2, "worker_b", NOW, DEFAULT_LEASE_DURATION, batch_size=3)
     assert {i.id for i in claimed_a2} & {i.id for i in claimed_b2} == set()
+
+
+def test_a_worker_whose_processing_outlasts_its_own_lease_does_not_double_execute():
+    """Found by stress-testing the mechanism after it shipped, not
+    requested: the lease is time-based, not transaction-based like
+    Postgres's FOR UPDATE SKIP LOCKED. If a worker's actual processing
+    takes longer than lease_duration, a second worker can correctly (from
+    its own perspective) reclaim and finish the same row first -- the
+    first worker is not dead, just slow. Confirms the FSM's own
+    validate_transition is the real backstop: the slow worker's belated
+    append_event(EXECUTING) on a row the fast worker already moved past
+    EXECUTING must be caught and skipped, not crash the rest of its batch
+    and not make a second real dispatch call."""
+    # Same engine, two independent sessions -- :memory: + StaticPool
+    # (db.py) makes this behave like two workers sharing one database,
+    # same pattern used elsewhere in this repo for simulating concurrent
+    # access without needing real threads or a file-backed DB.
+    engine = make_engine("sqlite:///:memory:")
+    session_factory = make_session_factory(engine)
+    session_slow = session_factory()
+    session_fast = session_factory()
+    lease = timedelta(minutes=5)
+
+    payment_id = "pay_slow"
+    append_event(session_slow, payment_id, PaymentState.AT_RISK, NOW)
+    append_event(session_slow, payment_id, PaymentState.DIAGNOSED, NOW)
+    session_slow.commit()
+    write_intent_with_state_change(
+        session_slow,
+        payment_id,
+        make_idempotency_key(payment_id, 1),
+        "send_payment_link",
+        {"amount_paise": 100_000, "customer_name": "C", "customer_contact": "9000000000"},
+        NOW,
+    )
+
+    # worker_slow claims but is, in fact, slow -- it hasn't processed yet
+    # by the time its own lease has expired.
+    claimed_slow = _claim_batch(session_slow, "worker_slow", NOW, lease, batch_size=10)
+    assert len(claimed_slow) == 1
+
+    # worker_fast checks in on a separate session after the lease expiry,
+    # correctly (from its perspective) reclaims, and finishes first.
+    past_expiry = NOW + lease + timedelta(seconds=1)
+    claimed_fast = _claim_batch(session_fast, "worker_fast", past_expiry, lease, batch_size=10)
+    assert len(claimed_fast) == 1
+
+    client_fast = FakeRazorpayClient()
+    processed_fast = _process_claimed_intents(session_fast, client_fast, past_expiry, claimed_fast)
+    assert len(processed_fast) == 1
+    assert len(client_fast.calls) == 1
+
+    # worker_slow now finally gets around to the intent it claimed
+    # earlier -- must be skipped, not crash, not dispatch a second time.
+    client_slow = FakeRazorpayClient()
+    processed_slow = _process_claimed_intents(session_slow, client_slow, NOW, claimed_slow)
+    assert processed_slow == []  # skipped -- not "ours" anymore
+    assert client_slow.calls == []  # no second real dispatch
+
+    assert derive_state(session_fast, payment_id) == PaymentState.AWAITING_CONFIRMATION
