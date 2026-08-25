@@ -28,6 +28,11 @@ from .outbox import OutboxIntent
 from .razorpay_client import PaymentLinkResult, RazorpayClientInterface
 from .states import AbandonReason, PaymentState
 
+# SIMULATED_SENT deliberately excluded (2026-08-25): a simulated action has
+# no real Razorpay record to reconcile against at all -- querying it would
+# correctly find nothing and misclassify a working simulated send as
+# ABANDONED(execution_error), a false statement in the audit trail. See
+# states.py's SIMULATED_SENT docstring and DECISIONS.md 2026-08-25.
 STALE_STATES = (PaymentState.EXECUTING, PaymentState.AWAITING_CONFIRMATION)
 TERMINAL_REMOTE_FAILURE_STATUSES = ("expired", "cancelled")
 

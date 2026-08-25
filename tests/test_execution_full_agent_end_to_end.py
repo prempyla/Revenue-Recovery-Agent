@@ -120,9 +120,15 @@ def test_full_agent_retry_now_path_is_dispatched_as_a_logged_simulated_send():
     assert client.calls == []  # no real API call for a simulated action
     assert processed[0].result["simulated"] is True
     assert processed[0].result["action_type"] == "retry_now"
-    assert derive_state(session, "pay_fa_retry") == PaymentState.AWAITING_CONFIRMATION
+    # 2026-08-25: terminal SIMULATED_SENT, not AWAITING_CONFIRMATION -- see
+    # states.py's docstring: nothing can ever confirm a send that never
+    # happened, so this must not wait on a confirmation that will never
+    # arrive (which reconciliation.py would eventually misclassify as
+    # execution_error -- a false statement, not a true failure).
+    assert derive_state(session, "pay_fa_retry") == PaymentState.SIMULATED_SENT
     last_event = history(session, "pay_fa_retry")[-1]
     assert last_event.payload["simulated"] is True
+    assert last_event.to_state == PaymentState.SIMULATED_SENT.value
 
 
 def test_both_action_types_share_the_same_customer_and_tracker_without_interference():

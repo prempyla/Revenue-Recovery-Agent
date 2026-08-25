@@ -170,6 +170,44 @@ def test_not_yet_stale_payment_is_left_untouched():
     assert derive_state(session, "pay_x") == PaymentState.EXECUTING
 
 
+def test_simulated_sent_never_appears_in_the_pollers_stuck_set():
+    """2026-08-25 fix: a simulated action (outbox.py's
+    SIMULATED_ACTION_TYPES) reaches the terminal SIMULATED_SENT, never
+    AWAITING_CONFIRMATION. The poller must never even consider it, let
+    alone misclassify it as execution_error -- querying Razorpay for a
+    reference_id that was never actually sent would (correctly) find
+    nothing, and "correctly find nothing" is not the same as "the system
+    failed", which is exactly the false-statement-in-the-ledger problem
+    this state exists to avoid."""
+    session = _session()
+    client = FakeRazorpayClient()
+    now = datetime(2026, 1, 1)
+    _to_diagnosed(session, "pay_x", now)
+    idem_key = make_idempotency_key("pay_x", 1)
+    write_intent_with_state_change(
+        session, "pay_x", idem_key, "retry_now",
+        {"amount_paise": 100_000, "customer_name": "C", "customer_contact": "9000000000"}, now,
+    )
+    append_event(session, "pay_x", PaymentState.EXECUTING, now)
+    append_event(
+        session, "pay_x", PaymentState.SIMULATED_SENT, now,
+        payload={"simulated": True, "action_type": "retry_now", "note": "test fixture"},
+    )
+    session.commit()
+    assert derive_state(session, "pay_x") == PaymentState.SIMULATED_SENT
+
+    # Long past any staleness threshold -- if SIMULATED_SENT were treated
+    # like EXECUTING/AWAITING_CONFIRMATION, this would already have fired.
+    poll_time = now + timedelta(days=30)
+    results = run_reconciliation_poll_once(session, client, poll_time, staleness_minutes=STALENESS)
+
+    # results == [] proves _stale_payment_ids never selected this payment at
+    # all -- the loop body (which is the only place fetch_payment_link_status
+    # gets called) never ran for it, not just that nothing changed.
+    assert results == []
+    assert derive_state(session, "pay_x") == PaymentState.SIMULATED_SENT  # unchanged
+
+
 def test_stuck_awaiting_confirmation_still_pending_makes_no_event_and_no_state_change():
     session = _session()
     client = FakeRazorpayClient()

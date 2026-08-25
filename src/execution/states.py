@@ -12,6 +12,27 @@ never completed payment. Collapsing those into a single state without
 recording which one happened would make the audit trail useless for
 answering "why did we give up on this payment" after the fact. Every
 transition INTO abandoned must carry an AbandonReason.
+
+SIMULATED_SENT (2026-08-25) is the same discipline applied a third time.
+Before this state existed, a simulated action (outbox.py's
+SIMULATED_ACTION_TYPES — no real Razorpay primitive behind it) transitioned
+to AWAITING_CONFIRMATION exactly like a real send, for FSM-shape
+consistency. But nothing can ever confirm it: no webhook will arrive for a
+send that never happened, and reconciliation.py's poller would eventually
+find it "stuck", query Razorpay, find no record (correctly — nothing was
+ever sent), and mark it ABANDONED(execution_error) — writing a FALSE
+statement into an append-only ledger: "the system tried and failed" when
+the truth is "the system worked exactly as designed and there was never
+anything to confirm." Same class of problem as the two entries above (see
+DECISIONS.md 2026-08-25's "recorded reason must be true" entry for the
+general rule this is the third instance of) — right behavior, wrong
+recorded reason. SIMULATED_SENT is reached directly from EXECUTING and is
+terminal; reconciliation.py's STALE_STATES tuple deliberately excludes it,
+so the poller never even considers a simulated action "stuck" in the first
+place. Legal only for actions the outbox worker itself tags simulated=True
+in the result payload — enforced at the call site (outbox.py), not by the
+FSM itself, same as AbandonReason isn't validated against which specific
+scenario produced it.
 """
 
 from enum import Enum
@@ -24,6 +45,7 @@ class PaymentState(str, Enum):
     SCHEDULED = "scheduled"
     EXECUTING = "executing"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
+    SIMULATED_SENT = "simulated_sent"
     RECOVERED = "recovered"
     ABANDONED = "abandoned"
 
@@ -39,8 +61,13 @@ ALLOWED_TRANSITIONS = {
     PaymentState.AT_RISK: {PaymentState.DIAGNOSED},
     PaymentState.DIAGNOSED: {PaymentState.SCHEDULED, PaymentState.ABANDONED},
     PaymentState.SCHEDULED: {PaymentState.EXECUTING, PaymentState.ABANDONED},
-    PaymentState.EXECUTING: {PaymentState.AWAITING_CONFIRMATION, PaymentState.ABANDONED},
+    PaymentState.EXECUTING: {
+        PaymentState.AWAITING_CONFIRMATION,
+        PaymentState.SIMULATED_SENT,
+        PaymentState.ABANDONED,
+    },
     PaymentState.AWAITING_CONFIRMATION: {PaymentState.RECOVERED, PaymentState.ABANDONED},
+    PaymentState.SIMULATED_SENT: set(),  # terminal -- nothing can ever confirm a simulated send
     PaymentState.RECOVERED: set(),
     PaymentState.ABANDONED: set(),
 }

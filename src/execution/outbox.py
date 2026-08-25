@@ -179,7 +179,17 @@ def run_outbox_worker_once(
         intent.status = "done"
         intent.result = result
         intent.executed_at = now
-        append_event(session, intent.payment_id, PaymentState.AWAITING_CONFIRMATION, now, payload=result)
+        # Simulated sends (result["simulated"] is True -- see
+        # _execute_simulated_action) go straight to the terminal
+        # SIMULATED_SENT, never AWAITING_CONFIRMATION: nothing can ever
+        # confirm a send that never happened, so waiting on a confirmation
+        # that will never arrive would be a false statement in the audit
+        # trail, not just an indefinite wait. See states.py's
+        # SIMULATED_SENT docstring and DECISIONS.md 2026-08-25.
+        next_state = (
+            PaymentState.SIMULATED_SENT if result.get("simulated") else PaymentState.AWAITING_CONFIRMATION
+        )
+        append_event(session, intent.payment_id, next_state, now, payload=result)
         session.commit()
         processed.append(intent)
 

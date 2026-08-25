@@ -113,9 +113,12 @@ def test_simulated_action_types_are_dispatched_without_a_real_api_call():
         assert processed[0].status == "done"
         assert processed[0].result["simulated"] is True
         assert processed[0].result["action_type"] == action_type
-        assert derive_state(session, "pay_x") == PaymentState.AWAITING_CONFIRMATION
+        # 2026-08-25: terminal SIMULATED_SENT, not AWAITING_CONFIRMATION --
+        # nothing can ever confirm a send that never happened.
+        assert derive_state(session, "pay_x") == PaymentState.SIMULATED_SENT
         last_event = history(session, "pay_x")[-1]
         assert last_event.payload["simulated"] is True
+        assert last_event.to_state == PaymentState.SIMULATED_SENT.value
 
 
 def test_execution_error_marks_abandoned_with_execution_error_reason():
