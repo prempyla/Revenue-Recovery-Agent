@@ -28,9 +28,10 @@ raises NotImplementedError, unchanged from before.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Integer, String
+from sqlalchemy import JSON, Integer, String
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from .clock import UTCDateTime
 from .db import Base
 from .eventlog import append_event
 from .razorpay_client import RazorpayClientInterface
@@ -53,9 +54,9 @@ class OutboxIntent(Base):
     action_type: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-    executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, index=True)
+    executed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 

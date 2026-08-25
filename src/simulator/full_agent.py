@@ -46,6 +46,7 @@ from . import config
 from .contact_tracking import ContactTracker, contact_cost_paise
 from .outage_detector import OutageDetectorConfig, detect_systemic_event
 from .policies import Plan
+from .timezones import ist_hour
 from .types import (
     CUSTOMER_FACING_ACTION_TYPES,
     Action,
@@ -207,7 +208,11 @@ def _veto_reason(
     three meanings would have been):
       1. explicit_opt_out -- the customer said stop (llm.classify_reply ->
          OPT_OUT -> tracker.mark_opted_out). Permanent, checked first.
-      2. outside_contact_hours -- this customer's declared window.
+      2. outside_contact_hours -- this customer's declared window, an IST
+         wall-clock concept (P1 fix, 2026-08-25 DECISIONS.md): action_time
+         is converted via timezones.ist_hour() rather than read directly,
+         since on execution/'s real UTC clock a bare .hour read would be
+         off by 5.5 hours on any UTC-hosted deployment.
       3. weekly_cap -- config.MAX_WEEKLY_CONTACTS against the tracker's
          running lifetime count. Deliberately conservative: decide() only
          has a lifetime count, not a timestamped rolling-window history, so
@@ -225,7 +230,7 @@ def _veto_reason(
         return "explicit_opt_out"
 
     start, end = customer.contact_hours
-    if not (start <= action_time.hour < end):
+    if not (start <= ist_hour(action_time) < end):
         return "outside_contact_hours"
 
     if tracker.contact_count(customer.customer_id) >= config.MAX_WEEKLY_CONTACTS:

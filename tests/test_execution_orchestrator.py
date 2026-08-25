@@ -1,7 +1,7 @@
 """Isolation tests for diagnose_and_schedule: the policy -> state -> outbox
 wiring, and the policy_stop ABANDONED reason path."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from simulator.types import Customer, DeclineReason, InstrumentType, Language, Payment
 
@@ -44,7 +44,7 @@ def test_insufficient_funds_schedules_a_send_payment_link_intent():
 
     session = _session()
     payment = _payment(DeclineReason.INSUFFICIENT_FUNDS)
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     intent = diagnose_and_schedule(session, payment, PERSONA, now)
 
@@ -65,7 +65,7 @@ def test_insufficient_funds_schedules_a_send_payment_link_intent():
 def test_mandate_revoked_abandons_with_policy_stop_reason():
     session = _session()
     payment = _payment(DeclineReason.MANDATE_REVOKED, InstrumentType.MANDATE)
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     intent = diagnose_and_schedule(session, payment, PERSONA, now)
 
@@ -87,7 +87,7 @@ def test_non_payment_link_action_now_schedules_a_simulated_intent():
 
     session = _session()
     payment = _payment(DeclineReason.NETWORK_TIMEOUT)
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     intent = diagnose_and_schedule(session, payment, PERSONA, now)
 

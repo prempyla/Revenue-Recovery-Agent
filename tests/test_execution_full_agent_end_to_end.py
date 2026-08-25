@@ -14,7 +14,7 @@ detector from live data; this test constructs them explicitly (empty, since
 no outage scenario is exercised here), same as the simulator's own tests do.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from simulator import ContactTracker
 from simulator.full_agent import make_full_agent_policy
@@ -38,7 +38,7 @@ PERSONA = Customer(
     preferred_language=Language.EN,
 )
 
-WINDOW_START = datetime(2026, 1, 1, 10, 0)
+WINDOW_START = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
 
 def _session():

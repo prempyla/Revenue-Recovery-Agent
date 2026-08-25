@@ -2,7 +2,7 @@
 firing every intent immediately (2026-08-25 audit fix #2). FakeRazorpayClient
 and an injected clock throughout -- no network, no real time reads."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from execution.db import make_engine, make_session_factory
 from execution.eventlog import append_event, derive_state
@@ -15,7 +15,7 @@ from simulator.full_agent import make_full_agent_policy
 from simulator.policies import RULES_ONLY_TABLE
 from simulator.types import Customer, DeclineReason, InstrumentType, Language, Payment
 
-WINDOW_START = datetime(2026, 1, 1, 10, 0)
+WINDOW_START = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
 PERSONA = Customer(
     customer_id="cust_due_at",
@@ -43,7 +43,7 @@ def _to_diagnosed(session, payment_id, now):
 
 def test_intent_with_due_at_in_the_future_is_not_picked_up():
     session = _session()
-    now = datetime(2026, 1, 1, 10, 0)
+    now = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     write_intent_with_state_change(
         session,
@@ -67,7 +67,7 @@ def test_intent_with_due_at_in_the_future_is_not_picked_up():
 
 def test_same_intent_is_picked_up_once_now_passes_due_at():
     session = _session()
-    now = datetime(2026, 1, 1, 10, 0)
+    now = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     due_at = now + timedelta(hours=4)
     write_intent_with_state_change(
@@ -96,7 +96,7 @@ def test_default_due_at_is_event_time_for_backward_compatible_callers():
     """Callers that never pass due_at (every pre-existing one) keep behaving
     exactly as before: due immediately."""
     session = _session()
-    now = datetime(2026, 1, 1, 10, 0)
+    now = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     write_intent_with_state_change(
         session,

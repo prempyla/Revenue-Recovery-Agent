@@ -4,7 +4,7 @@ dedup, and process_webhook_event's RECOVERED / payment_failed transitions."""
 import hashlib
 import hmac
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -70,7 +70,7 @@ def test_valid_signature_is_accepted_and_processed():
     session_factory = _session_factory()
     session = session_factory()
     idem_key = make_idempotency_key("pay_x", 1)
-    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1))
+    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1, tzinfo=timezone.utc))
     session.close()
 
     app = create_app(session_factory, WEBHOOK_SECRET)
@@ -96,7 +96,7 @@ def test_duplicate_event_id_is_deduped_and_processed_only_once():
     session_factory = _session_factory()
     session = session_factory()
     idem_key = make_idempotency_key("pay_x", 1)
-    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1))
+    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1, tzinfo=timezone.utc))
     session.close()
 
     app = create_app(session_factory, WEBHOOK_SECRET)
@@ -125,13 +125,13 @@ def test_process_webhook_event_payment_expired_abandons_with_payment_failed_reas
     session_factory = _session_factory()
     session = session_factory()
     idem_key = make_idempotency_key("pay_x", 1)
-    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1))
+    _to_awaiting_confirmation(session, "pay_x", datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     payload = {
         "event": "payment_link.expired",
         "payload": {"payment_link": {"entity": {"reference_id": idem_key}}},
     }
-    process_webhook_event(session, payload, datetime(2026, 1, 2))
+    process_webhook_event(session, payload, datetime(2026, 1, 2, tzinfo=timezone.utc))
 
     assert derive_state(session, "pay_x") == PaymentState.ABANDONED
     last_event = history(session, "pay_x")[-1]
@@ -153,9 +153,9 @@ def test_real_payment_link_paid_fixture_parses_and_recovers():
     session_factory = _session_factory()
     session = session_factory()
     payment_id = reference_id.split(":attempt:")[0]
-    _to_awaiting_confirmation(session, payment_id, datetime(2026, 1, 1))
+    _to_awaiting_confirmation(session, payment_id, datetime(2026, 1, 1, tzinfo=timezone.utc))
 
-    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1))
+    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     assert acted_on == payment_id
     assert derive_state(session, payment_id) == PaymentState.RECOVERED
@@ -170,7 +170,7 @@ def test_real_payment_failed_fixture_is_ignored_not_acted_on():
 
     session_factory = _session_factory()
     session = session_factory()
-    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1))
+    acted_on = process_webhook_event(session, fixture, datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert acted_on is None
 
 
@@ -180,5 +180,5 @@ def test_is_duplicate_event_false_before_seen_true_after():
     assert is_duplicate_event(session, "evt_new") is False
     from execution.webhook import mark_event_seen
 
-    mark_event_seen(session, "evt_new", datetime(2026, 1, 1))
+    mark_event_seen(session, "evt_new", datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert is_duplicate_event(session, "evt_new") is True

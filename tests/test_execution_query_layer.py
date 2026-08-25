@@ -10,7 +10,7 @@ Two assertions the task specifically asked for:
      fire correctly (weekly_cap, via full_agent.decide()).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from simulator import config
 from simulator.full_agent import decide
@@ -24,7 +24,7 @@ from execution.outbox import run_outbox_worker_once
 from execution.query_layer import contact_tracker_for, recent_failures
 from execution.razorpay_client import FakeRazorpayClient
 
-WINDOW_START = datetime(2026, 1, 1, 10, 0)
+WINDOW_START = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
 PERSONA = Customer(
     customer_id="cust_query_layer",

@@ -8,7 +8,7 @@ existing decide() path, never a direct action)."""
 
 import ast
 import inspect
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from llm import ClassifiedReply, ReplyIntent, apply_reply_intent
 from simulator import ContactTracker, DeclineReason, InstrumentType, Language
@@ -18,7 +18,7 @@ from simulator.types import ActionType, Customer, Payment
 from execution.db import make_engine, make_session_factory
 from execution.opt_out_events import CustomerOptOutEvent
 
-WINDOW_START = datetime(2026, 1, 1, 10, 0)
+WINDOW_START = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
 
 PERSONA = Customer(
     customer_id="cust_reply",

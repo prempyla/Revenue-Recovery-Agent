@@ -70,6 +70,47 @@ def test_contact_hours_veto_forces_stop_even_though_action_would_otherwise_score
     assert decision is None  # vetoed, not scored around
 
 
+def test_utc_action_time_outside_ist_window_numerically_is_still_permitted_once_converted():
+    """P1 timezone fix (2026-08-25, DECISIONS.md): the contact-hours veto
+    must evaluate the customer's declared window in IST, not against
+    whatever zone action_time happens to be expressed in. This is the case
+    that would have been WRONGLY VETOED by the pre-fix bug (a bare
+    action_time.hour read): 04:00 UTC is outside (9, 21) numerically, but
+    converts to 09:30 IST -- inside the window, so the real-world contact
+    is genuinely allowed and must not be blocked by a clock error."""
+    from zoneinfo import ZoneInfo
+
+    persona = _persona(contact_hours=(9, 21))
+    utc_time = datetime(2026, 1, 1, 4, 0, tzinfo=ZoneInfo("UTC"))
+    assert not (9 <= utc_time.hour < 21)  # the bug's bare .hour read would reject this
+    payment = _payment(DeclineReason.RISK_DECLINE, failed_at=utc_time)
+
+    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+
+    assert decision is not None
+    assert decision[1].action_type == ActionType.ESCALATE_ALTERNATE_INSTRUMENT
+
+
+def test_utc_action_time_inside_ist_window_numerically_is_correctly_vetoed():
+    """The other direction, and the more dangerous one: this is the case
+    that would have been WRONGLY PERMITTED by the pre-fix bug. 16:00 UTC is
+    inside (9, 21) numerically -- a bare action_time.hour read would have
+    let this contact through -- but it converts to 21:30 IST, outside the
+    customer's declared window. On a UTC-hosted deployment (the only
+    realistic one) the pre-fix code would have contacted this customer
+    outside their allowed hours and never known it."""
+    from zoneinfo import ZoneInfo
+
+    persona = _persona(contact_hours=(9, 21))
+    utc_time = datetime(2026, 1, 1, 16, 0, tzinfo=ZoneInfo("UTC"))
+    assert 9 <= utc_time.hour < 21  # the bug's bare .hour read would (wrongly) accept this
+    payment = _payment(DeclineReason.RISK_DECLINE, failed_at=utc_time, amount_paise=5_000_000)
+
+    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+
+    assert decision is None  # vetoed: true IST hour is 21, outside the window
+
+
 def test_weekly_cap_veto_stops_further_customer_facing_contact():
     from simulator import config
 

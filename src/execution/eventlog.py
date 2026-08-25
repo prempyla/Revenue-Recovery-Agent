@@ -9,9 +9,10 @@ or hand-edited event sequence is caught at read time, not silently believed.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from .clock import UTCDateTime
 from .db import Base
 from .states import AbandonReason, IllegalStateTransition, PaymentState, validate_transition
 
@@ -24,7 +25,7 @@ class EventRecord(Base):
     from_state: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     to_state: Mapped[str] = mapped_column(String, nullable=False)
     abandon_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 

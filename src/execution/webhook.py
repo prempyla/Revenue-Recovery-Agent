@@ -27,6 +27,13 @@ tests/fixtures/real_webhook_*.json):
     payment_link.paid each delivered multiple times while every attempt was
     400ing) -- confirms at-least-once delivery is real, not just a spec
     claim, and that is_duplicate_event()'s dedup earns its place here.
+
+P1 timezone fix (2026-08-25, DECISIONS.md): the two real-clock reads here
+(mark_event_seen, process_webhook_event's background call) used to be bare
+`datetime.now()` -- host-local time, not guaranteed to be IST or even UTC.
+Now `.clock.utc_now()`, explicit and timezone-aware. See clock.py for the
+full writeup and simulator/timezones.py for the other half (converting a
+UTC timestamp back to IST for the business rules that actually need it).
 """
 
 import json
@@ -34,10 +41,11 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from sqlalchemy import DateTime, String
+from sqlalchemy import String
 from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy.orm import sessionmaker
 
+from .clock import UTCDateTime, utc_now
 from .db import Base
 from .eventlog import append_event
 from .states import AbandonReason, PaymentState
@@ -47,7 +55,7 @@ class SeenWebhookEvent(Base):
     __tablename__ = "seen_webhook_events"
 
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 
 def verify_signature(raw_body: bytes, signature: str, secret: str) -> bool:
@@ -145,7 +153,7 @@ def create_app(session_factory: sessionmaker, webhook_secret: str) -> FastAPI:
         try:
             if is_duplicate_event(session, event_id):
                 return {"status": "ok", "duplicate": True}
-            mark_event_seen(session, event_id, datetime.now())
+            mark_event_seen(session, event_id, utc_now())
         finally:
             session.close()
 
@@ -158,6 +166,6 @@ def create_app(session_factory: sessionmaker, webhook_secret: str) -> FastAPI:
 def _process_in_background(session_factory: sessionmaker, payload: dict) -> None:
     session = session_factory()
     try:
-        process_webhook_event(session, payload, datetime.now())
+        process_webhook_event(session, payload, utc_now())
     finally:
         session.close()

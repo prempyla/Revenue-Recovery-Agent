@@ -1,7 +1,7 @@
 """Isolation tests for the reconciliation poller. FakeRazorpayClient only,
 no network."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from execution.db import make_engine, make_session_factory
 from execution.eventlog import append_event, derive_state, history
@@ -49,7 +49,7 @@ def _schedule_and_create_link(session, client, payment_id, now, attempt=1):
 def test_stuck_executing_with_created_remote_link_catches_up_to_awaiting_confirmation():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     # Simulate: the API call actually succeeded, but the process crashed
     # right after, before run_outbox_worker_once recorded it -- state is
@@ -70,7 +70,7 @@ def test_stuck_executing_with_created_remote_link_catches_up_to_awaiting_confirm
 def test_stuck_executing_with_paid_remote_status_reconciles_straight_to_recovered():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     append_event(session, "pay_x", PaymentState.EXECUTING, now)
     session.commit()
@@ -90,7 +90,7 @@ def test_stuck_executing_with_paid_remote_status_reconciles_straight_to_recovere
 def test_stuck_executing_with_no_remote_record_abandons_with_execution_error():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     idem_key = make_idempotency_key("pay_x", 1)
     write_intent_with_state_change(
@@ -115,7 +115,7 @@ def test_stuck_executing_with_no_remote_record_abandons_with_execution_error():
 def test_stuck_awaiting_confirmation_with_paid_remote_status_reconciles_to_recovered():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     append_event(session, "pay_x", PaymentState.EXECUTING, now)
     append_event(session, "pay_x", PaymentState.AWAITING_CONFIRMATION, now)
@@ -137,7 +137,7 @@ def test_stuck_awaiting_confirmation_with_paid_remote_status_reconciles_to_recov
 def test_stuck_awaiting_confirmation_with_expired_remote_status_abandons_with_payment_failed():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     append_event(session, "pay_x", PaymentState.EXECUTING, now)
     append_event(session, "pay_x", PaymentState.AWAITING_CONFIRMATION, now)
@@ -157,7 +157,7 @@ def test_stuck_awaiting_confirmation_with_expired_remote_status_abandons_with_pa
 def test_not_yet_stale_payment_is_left_untouched():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     append_event(session, "pay_x", PaymentState.EXECUTING, now)
     session.commit()
@@ -181,7 +181,7 @@ def test_simulated_sent_never_appears_in_the_pollers_stuck_set():
     this state exists to avoid."""
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     idem_key = make_idempotency_key("pay_x", 1)
     write_intent_with_state_change(
@@ -211,7 +211,7 @@ def test_simulated_sent_never_appears_in_the_pollers_stuck_set():
 def test_stuck_awaiting_confirmation_still_pending_makes_no_event_and_no_state_change():
     session = _session()
     client = FakeRazorpayClient()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     idem_key, _ = _schedule_and_create_link(session, client, "pay_x", now)
     append_event(session, "pay_x", PaymentState.EXECUTING, now)
     append_event(session, "pay_x", PaymentState.AWAITING_CONFIRMATION, now)

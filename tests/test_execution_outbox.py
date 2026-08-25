@@ -1,7 +1,7 @@
 """Isolation tests for the outbox: crash survival, idempotency-key
 determinism, unmapped-action NotImplementedError, execution-error handling."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -42,7 +42,7 @@ def test_intent_survives_a_simulated_crash_between_persist_and_execute(tmp_path)
     there and gets picked up and executed correctly by a fresh worker call."""
     db_path = tmp_path / "execution.db"
     db_url = f"sqlite:///{db_path}"
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     # "Process 1": decide and persist, then simulate a crash (just stop
     # using this engine/session -- nothing further happens with it).
@@ -82,7 +82,7 @@ def test_unmapped_action_type_raises_not_implemented():
     longer demonstrates "unmapped". Using a genuinely fictional action_type
     instead; every real ActionType enum value is now covered by _DISPATCH."""
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     write_intent_with_state_change(
         session, "pay_x", make_idempotency_key("pay_x", 1), "teleport_customer", {}, now
@@ -100,7 +100,7 @@ def test_simulated_action_types_are_dispatched_without_a_real_api_call():
 
     for action_type in SIMULATED_ACTION_TYPES:
         session = _session()
-        now = datetime(2026, 1, 1)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         _to_diagnosed(session, "pay_x", now)
         write_intent_with_state_change(
             session, "pay_x", make_idempotency_key("pay_x", 1), action_type, {}, now
@@ -123,7 +123,7 @@ def test_simulated_action_types_are_dispatched_without_a_real_api_call():
 
 def test_execution_error_marks_abandoned_with_execution_error_reason():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _to_diagnosed(session, "pay_x", now)
     idem_key = make_idempotency_key("pay_x", 1)
     write_intent_with_state_change(

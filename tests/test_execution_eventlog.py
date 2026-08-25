@@ -1,6 +1,6 @@
 """Isolation tests for the append-only event log and state-by-replay."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -21,7 +21,7 @@ def test_state_is_none_with_no_events():
 
 def test_state_derived_by_replaying_appended_events():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     append_event(session, "pay_x", PaymentState.AT_RISK, now)
     append_event(session, "pay_x", PaymentState.DIAGNOSED, now + timedelta(minutes=1))
     append_event(session, "pay_x", PaymentState.SCHEDULED, now + timedelta(minutes=2))
@@ -32,7 +32,7 @@ def test_state_derived_by_replaying_appended_events():
 
 def test_append_event_raises_on_illegal_transition():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     append_event(session, "pay_x", PaymentState.AT_RISK, now)
     session.commit()
     with pytest.raises(IllegalStateTransition):
@@ -41,7 +41,7 @@ def test_append_event_raises_on_illegal_transition():
 
 def test_append_event_raises_when_reason_missing_on_abandon():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     append_event(session, "pay_x", PaymentState.AT_RISK, now)
     append_event(session, "pay_x", PaymentState.DIAGNOSED, now)
     session.commit()
@@ -51,7 +51,7 @@ def test_append_event_raises_when_reason_missing_on_abandon():
 
 def test_history_returns_full_ordered_sequence_with_reason_recorded():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     append_event(session, "pay_x", PaymentState.AT_RISK, now)
     append_event(session, "pay_x", PaymentState.DIAGNOSED, now)
     append_event(
@@ -71,7 +71,7 @@ def test_history_returns_full_ordered_sequence_with_reason_recorded():
 
 def test_events_for_different_payments_are_independent():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     append_event(session, "pay_a", PaymentState.AT_RISK, now)
     append_event(session, "pay_a", PaymentState.DIAGNOSED, now)
     append_event(session, "pay_b", PaymentState.AT_RISK, now)

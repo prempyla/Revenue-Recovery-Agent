@@ -3,7 +3,7 @@ executes (fake client, no network) -> simulated webhook confirms -> state
 updated. This is the single route this round: INSUFFICIENT_FUNDS ->
 rules_only -> send_payment_link."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from simulator.types import Customer, DeclineReason, InstrumentType, Language, Payment
 
@@ -43,7 +43,7 @@ def _session():
 
 def test_full_path_ends_in_recovered_when_webhook_confirms_payment():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     intent = diagnose_and_schedule(session, PAYMENT, PERSONA, now)
     assert intent is not None
@@ -83,7 +83,7 @@ def test_full_path_ends_in_recovered_when_webhook_confirms_payment():
 
 def test_full_path_ends_in_abandoned_when_webhook_reports_expiry():
     session = _session()
-    now = datetime(2026, 1, 1)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     intent = diagnose_and_schedule(session, PAYMENT, PERSONA, now)
     client = FakeRazorpayClient()

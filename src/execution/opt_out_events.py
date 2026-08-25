@@ -26,9 +26,10 @@ holds after any restart, not just within the process that recorded it.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from .clock import UTCDateTime
 from .db import Base
 
 
@@ -39,7 +40,7 @@ class CustomerOptOutEvent(Base):
     customer_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     reply_intent: Mapped[str] = mapped_column(String, nullable=False)
     source_payment_id: Mapped[str] = mapped_column(String, nullable=False)
-    event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    event_time: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 
 def record_opt_out(
