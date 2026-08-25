@@ -22,20 +22,16 @@ from the same `now`, so this is consistent with how the rest of this
 codebase already treats "failure time" and "diagnosis time" as the same
 instant).
 
-Schema gap found and NOT closed, reported instead: nothing in execution/
-persists an explicit customer opt-out event. llm.reply_handling.
-apply_reply_intent only mutates an ephemeral in-memory ContactTracker on an
-OPT_OUT classification — it has no import of execution.* at all (by
-design, checked structurally in tests/test_llm_reply_handling.py) and
-never writes anything to this event log. So contact_tracker_for() below
-correctly reconstructs contact_count (every customer-facing dispatch IS in
-the log, via OutboxIntent + the EXECUTING event), but cannot reconstruct
-opted_out — there is nothing persisted to read it back from. The tracker
-this returns will never report a customer as opted out; that honestly
-reflects what's actually recorded rather than fabricating a false negative,
-but it does mean full_agent's explicit_opt_out veto is currently
-unreachable through this query layer. Adding a persisted opt-out event type
-to execution/ is a real gap for a future round, out of scope here.
+Schema gap found 2026-08-25, and CLOSED the same day (see DECISIONS.md,
+both entries): this originally read "opted_out cannot be reconstructed —
+nothing persists it." Fixed by adding execution/opt_out_events.py, a
+dedicated append-only table for this one customer-scoped fact (not the
+payment-scoped EventRecord/FSM — an opt-out isn't a payment lifecycle
+transition). llm.reply_handling.apply_reply_intent now writes there
+directly on an OPT_OUT classification; contact_tracker_for() below reads
+the earliest row back and marks the reconstructed tracker opted out from
+that moment, so the veto now survives a restart — not just a same-process
+guarantee anymore.
 
 outage_events, separately: full_agent.decide()'s outage_events parameter is
 threaded through to _candidates_for but never actually read there (only
@@ -52,6 +48,7 @@ from simulator.contact_tracking import ContactTracker, is_customer_facing
 from simulator.types import Action, ActionType, DeclineReason, InstrumentType, Payment
 
 from .eventlog import EventRecord
+from .opt_out_events import earliest_opt_out
 from .outbox import OutboxIntent
 from .states import PaymentState
 
@@ -135,8 +132,14 @@ def contact_tracker_for(session: Session, customer_id: str) -> ContactTracker:
     chronological order, for payments belonging to this customer (matched
     via each payment's DIAGNOSED event payload).
 
-    Does NOT reconstruct opted_out — see module docstring."""
+    opted_out is reconstructed from opt_out_events.earliest_opt_out() — the
+    same persisted table apply_reply_intent writes to — so the veto this
+    produces survives a process restart, not just a same-process call."""
     tracker = ContactTracker()
+
+    opt_out_at = earliest_opt_out(session, customer_id)
+    if opt_out_at is not None:
+        tracker.mark_opted_out(customer_id, opt_out_at)
 
     entries = []
     for payment_id in _payment_ids_for_customer(session, customer_id):

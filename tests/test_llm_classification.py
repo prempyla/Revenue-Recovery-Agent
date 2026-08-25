@@ -17,6 +17,7 @@ classification's output type.
 
 import pytest
 
+from execution.db import make_engine, make_session_factory
 from execution.razorpay_client import FakeRazorpayClient
 from llm import ClassifiedReply, FakeLLMClient, ReplyIntent, apply_reply_intent, classify_reply
 from llm.classification import MAX_REPLY_TEXT_CHARS, _parse_classification_response, _regex_classify
@@ -25,6 +26,11 @@ from simulator.types import Customer, Payment
 from datetime import datetime
 
 WINDOW_START = datetime(2026, 1, 1)
+
+
+def _session():
+    engine = make_engine("sqlite:///:memory:")
+    return make_session_factory(engine)()
 
 PERSONA = Customer(
     customer_id="cust_adv",
@@ -92,7 +98,8 @@ def test_adversarial_reply_with_well_behaved_model_lands_safely(reply_text):
     # No payment action resulted, structurally: apply_reply_intent never
     # touches razorpay_client, and empirically: zero calls were made.
     tracker = ContactTracker()
-    outcome = apply_reply_intent(result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
+    session = _session()
+    outcome = apply_reply_intent(session, result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
     assert razorpay.calls == []
     assert outcome is None or isinstance(outcome, tuple)  # never a direct API call/result
 
@@ -114,7 +121,8 @@ def test_adversarial_reply_even_with_compromised_model_lands_safely(reply_text, 
     assert result.intent in set(ReplyIntent)
 
     tracker = ContactTracker()
-    outcome = apply_reply_intent(result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
+    session = _session()
+    outcome = apply_reply_intent(session, result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
     assert razorpay.calls == []
     assert outcome is None or isinstance(outcome, tuple)
 
@@ -140,7 +148,8 @@ def test_extra_field_alongside_a_valid_intent_is_ignored_not_acted_on(reply_text
     assert result.intent == ReplyIntent.PROMISE_TO_PAY  # correctly resolved, extra field ignored
 
     tracker = ContactTracker()
-    outcome = apply_reply_intent(result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
+    session = _session()
+    outcome = apply_reply_intent(session, result, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
     assert razorpay.calls == []
     # PROMISE_TO_PAY's only effect is calling the existing decide() path --
     # never a direct execution of the smuggled "action": "refund".

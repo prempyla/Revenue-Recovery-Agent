@@ -247,10 +247,129 @@ def test_contact_tracker_for_does_not_count_scheduled_but_not_yet_dispatched_int
     assert tracker.contact_count(PERSONA.customer_id) == 0
 
 
-def test_contact_tracker_for_never_reports_opted_out_since_nothing_persists_it():
-    """Honest reflection of the reported gap: no opt-out event exists in
-    execution/'s log at all, so the reconstructed tracker can never say a
-    customer opted out -- not a false negative, just what's actually there."""
+def test_contact_tracker_for_reports_not_opted_out_when_no_event_was_ever_recorded():
+    """2026-08-25: the opt-out gap is closed now (see below), but the
+    baseline case must still hold -- a customer with no persisted opt-out
+    event at all is correctly NOT opted out, not a false positive."""
     session = _session()
     tracker = contact_tracker_for(session, PERSONA.customer_id)
     assert tracker.is_opted_out(PERSONA.customer_id) is False
+
+
+# --- Persisted opt-out (2026-08-25 fix): the gap flagged in the previous
+# round is closed here. The important one is restart survival -- an
+# in-memory-only guardrail isn't a guardrail. ---
+
+
+def test_opt_out_survives_a_restart_a_fresh_tracker_from_a_new_session_still_vetoes():
+    """THE important test. Persist an opt-out through one engine/session,
+    then simulate a process restart: a BRAND NEW engine reconnecting to the
+    same on-disk file (:memory: wouldn't survive this -- same pattern as
+    the outbox crash-recovery test), a fresh contact_tracker_for() call,
+    and confirm full_agent.decide() still vetoes. If this passes only
+    because of in-memory state, it would fail here; it doesn't."""
+    from execution.opt_out_events import record_opt_out
+
+    db_path = None
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_path = f"{tmp_dir}/execution.db"
+        db_url = f"sqlite:///{db_path}"
+
+        # "Process 1": customer replies OPT_OUT, gets persisted, then the
+        # process ends -- nothing further happens with this engine/session.
+        engine_1 = make_engine(db_url)
+        session_1 = make_session_factory(engine_1)()
+        record_opt_out(
+            session_1,
+            customer_id=PERSONA.customer_id,
+            reply_intent="OPT_OUT",
+            source_payment_id="pay_restart_test",
+            event_time=WINDOW_START,
+        )
+        session_1.close()
+
+        # "Process 2": a fresh engine/session reconnecting to the same file --
+        # nothing in memory carried over from process 1.
+        engine_2 = make_engine(db_url)
+        session_2 = make_session_factory(engine_2)()
+
+        tracker = contact_tracker_for(session_2, PERSONA.customer_id)
+        assert tracker.is_opted_out(PERSONA.customer_id) is True
+
+        new_payment = Payment(
+            payment_id="pay_after_restart",
+            customer_id=PERSONA.customer_id,
+            amount_paise=500_000,
+            instrument_type=InstrumentType.CARD,
+            decline_reason=DeclineReason.AFA_3DS_DROPOFF,
+            issuer_code="HDFC",
+            failed_at=WINDOW_START + timedelta(hours=1),
+        )
+        decision = decide(
+            new_payment, PERSONA, new_payment.failed_at, tracker, failure_log=[], outage_events=[]
+        )
+        assert decision is None  # vetoed, reconstructed entirely from disk
+
+
+def test_opt_out_is_permanent_still_vetoes_60_days_later_unlike_the_weekly_cap():
+    """Contrast with the weekly cap, which is a rolling 7-day window and
+    resets: opt-out has no expiry at all."""
+    from execution.opt_out_events import record_opt_out
+
+    session = _session()
+    record_opt_out(
+        session,
+        customer_id=PERSONA.customer_id,
+        reply_intent="OPT_OUT",
+        source_payment_id="pay_long_ago",
+        event_time=WINDOW_START,
+    )
+
+    tracker = contact_tracker_for(session, PERSONA.customer_id)
+    much_later_payment = Payment(
+        payment_id="pay_60_days_later",
+        customer_id=PERSONA.customer_id,
+        amount_paise=500_000,
+        instrument_type=InstrumentType.CARD,
+        decline_reason=DeclineReason.AFA_3DS_DROPOFF,
+        issuer_code="HDFC",
+        failed_at=WINDOW_START + timedelta(days=60),
+    )
+    decision = decide(
+        much_later_payment, PERSONA, much_later_payment.failed_at, tracker, failure_log=[], outage_events=[]
+    )
+    assert decision is None  # still vetoed, 60 days on
+
+
+def test_opt_out_veto_fires_before_scoring_a_huge_payment_cannot_outscore_it():
+    """Same requirement as the other hard vetoes (contact_hours, weekly_cap):
+    a compliance rule that can be outscored by a big enough payment isn't a
+    compliance rule. A huge amount_paise would otherwise score enormously
+    positive for AFA_3DS_DROPOFF's send_nudge candidate."""
+    from execution.opt_out_events import record_opt_out
+
+    session = _session()
+    record_opt_out(
+        session,
+        customer_id=PERSONA.customer_id,
+        reply_intent="OPT_OUT",
+        source_payment_id="pay_opt_out_source",
+        event_time=WINDOW_START,
+    )
+    tracker = contact_tracker_for(session, PERSONA.customer_id)
+
+    huge_payment = Payment(
+        payment_id="pay_huge",
+        customer_id=PERSONA.customer_id,
+        amount_paise=50_000_000_00,  # Rs 5,00,000 -- would trivially outscore any cost if scored at all
+        instrument_type=InstrumentType.CARD,
+        decline_reason=DeclineReason.AFA_3DS_DROPOFF,
+        issuer_code="HDFC",
+        failed_at=WINDOW_START + timedelta(hours=1),
+    )
+    decision = decide(
+        huge_payment, PERSONA, huge_payment.failed_at, tracker, failure_log=[], outage_events=[]
+    )
+    assert decision is None  # vetoed before scoring ever saw the amount
