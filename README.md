@@ -20,13 +20,18 @@ The proof isn't a claim in this paragraph — it's `tests/test_llm_fallback.py`,
 
 ## Status
 
-Early build. See `DECISIONS.md` for a running log of what's been decided and why.
+See `DECISIONS.md` for a running log of what's been decided and why, and `docs/INCIDENTS.md` for what broke along the way and how it got fixed.
 
 ## Setup
 
 ```bash
-cp .env.example .env
-# fill in your Razorpay test-mode keys
+make install   # creates .venv, installs requirements.txt
+make test      # 238+ tests, no network, no keys needed
+make demo      # seeded end-to-end run through the real execution pipeline
+make crash-demo  # kills a worker mid-dispatch with a real SIGKILL, restarts it, reconciles the result
+make charts    # regenerates the three evaluation charts in docs/charts/
 ```
 
-(Full run instructions to be added as the pipeline comes together.)
+`make test`, `make demo`, and `make crash-demo` run entirely against `FakeRazorpayClient` — no network calls, no Razorpay keys required. Real keys (`.env`, from `.env.example`) are only needed for the two manual-verification scripts under `src/execution/` (`create_demo_link.py`, `run_webhook_server.py`) that were used once to verify the real API's actual shape — see `docs/manual_webhook_verification.md`. Nothing in the automated test suite, the demo, or the charts depends on them.
+
+No web UI or dashboard — deliberate, not unbuilt. See `DECISIONS.md`.

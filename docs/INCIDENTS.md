@@ -241,6 +241,14 @@ Minor. While starting the P1 worker-lease task, inserting the timezone-fix entry
 
 ---
 
+## The demo's outage payment silently used the wrong detector threshold
+
+Minor. While building `scripts/demo_run.py` (`make demo`), the outage-hold payment was seeded with a 4-failure burst against the same issuer — enough to trip `detect_systemic_event` in the circuit-breaker unit tests, which deliberately use a lower `count_threshold=3` for small hand-built scenarios. Against the actual *production* config `full_agent` uses by default (`count_threshold=6`, strictly greater-than), 4 failures never breached it — the payment silently fell through to a normal ~20-minute retry instead of the jittered/ramped outage-hold path the demo exists to show off. Caught by reading the printed `due_at` (`+0:20:00`, the untouched-path value) rather than the intended multi-hour held offset, not by any test failure — nothing asserts what this demo script's own output should look like. Fixed by sizing the burst to 7 failures, correctly clearing the real threshold. Folded into the same round: a raw `timedelta` repr in the same script's `due_at` printout showed microsecond noise (`+2:15:47.733629`) before anyone but me saw it — rounded to whole seconds before committing.
+
+**Why it's worth a line and not more:** the demo script isn't part of the system under test, so this couldn't have caused a real-world bug — but it's a concrete instance of the same lesson as the circuit-breaker regression above, at much lower stakes: two numbers that are both called "the detection threshold" can silently be different values in different parts of the same codebase (one tuned for fast, deterministic unit tests; one tuned for the actual policy), and code written against the wrong one fails silently rather than loudly, showing a *plausible*, not obviously-broken, path instead of the intended one.
+
+---
+
 ## The recurring pattern
 
 Four separate incidents across this build share one exact shape, found roughly three weeks apart in build time but structurally identical each time: **the system's behavior was correct, but the reason recorded for that behavior was false, or nothing was recorded at all.** This matters specifically because the audit trail here is append-only by design (see DECISIONS.md's original architecture decision) — the entire point of that choice is that "what actually happened" should be provable from the log rather than trusted on faith. Each of these four incidents is a way that guarantee can quietly fail without any single line in the log being individually wrong.
