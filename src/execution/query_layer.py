@@ -37,6 +37,14 @@ outage_events, separately: full_agent.decide()'s outage_events parameter is
 threaded through to _candidates_for but never actually read there (only
 failure_log reaches detect_systemic_event) — confirmed by inspection, not
 assumed. There is nothing to query for it; callers pass an empty list.
+
+payment_by_id() (2026-08-27, wiring llm.reply_handling into a real path —
+see INCIDENTS.md, external cold review Finding 2): a live inbound-reply
+handler needs to reconstruct the ONE specific Payment a customer's reply
+refers to, not a time-window scan — recent_failures()'s shape doesn't fit.
+Factored _payment_from_diagnosed_event() out of recent_failures() so both
+share the exact same reconstruction (and the same honesty about what gets
+skipped) instead of two copies drifting apart.
 """
 
 from datetime import datetime, timedelta
@@ -73,6 +81,30 @@ def _first_event_time(session: Session, payment_id: str, state: PaymentState) ->
     return row.event_time if row else None
 
 
+def _payment_from_diagnosed_event(session: Session, event: EventRecord) -> Optional[Payment]:
+    """Shared by recent_failures() and payment_by_id() — one reconstruction,
+    one definition of what's honest to skip. Does not fabricate: returns
+    None (never a guessed Payment) for a DIAGNOSED event missing a required
+    field, or one whose AT_RISK event can't be found — this only happens
+    for events written before the 2026-08-25 payload fix, or a corrupted
+    log."""
+    p = event.payload or {}
+    if not all(field in p for field in _REQUIRED_DIAGNOSED_FIELDS):
+        return None
+    failed_at = _first_event_time(session, event.payment_id, PaymentState.AT_RISK)
+    if failed_at is None:
+        return None
+    return Payment(
+        payment_id=event.payment_id,
+        customer_id=p["customer_id"],
+        amount_paise=p["amount_paise"],
+        instrument_type=InstrumentType(p["instrument_type"]),
+        decline_reason=DeclineReason(p["decline_reason"]),
+        issuer_code=p["issuer_code"],
+        failed_at=failed_at,
+    )
+
+
 def recent_failures(
     session: Session, now: datetime, lookback: timedelta = DEFAULT_FAILURE_LOOKBACK
 ) -> List[Payment]:
@@ -80,13 +112,7 @@ def recent_failures(
     [now - lookback, now] — the failure_log shape
     simulator.outage_detector.detect_systemic_event (via full_agent.decide)
     expects. `now` is a parameter, never read from the clock, same
-    discipline as decide() itself.
-
-    Skips (does not fabricate) any DIAGNOSED event missing a required
-    field, or any payment whose AT_RISK event can't be found — this only
-    happens for events written before the 2026-08-25 payload fix, or a
-    corrupted log; either way, the honest move is to leave that payment out
-    of the failure log, not invent its issuer_code."""
+    discipline as decide() itself."""
     diagnosed_events = (
         session.query(EventRecord)
         .filter(EventRecord.to_state == PaymentState.DIAGNOSED.value)
@@ -94,27 +120,25 @@ def recent_failures(
         .order_by(EventRecord.id)
         .all()
     )
+    failures = [_payment_from_diagnosed_event(session, event) for event in diagnosed_events]
+    return [f for f in failures if f is not None]
 
-    failures = []
-    for event in diagnosed_events:
-        p = event.payload or {}
-        if not all(field in p for field in _REQUIRED_DIAGNOSED_FIELDS):
-            continue
-        failed_at = _first_event_time(session, event.payment_id, PaymentState.AT_RISK)
-        if failed_at is None:
-            continue
-        failures.append(
-            Payment(
-                payment_id=event.payment_id,
-                customer_id=p["customer_id"],
-                amount_paise=p["amount_paise"],
-                instrument_type=InstrumentType(p["instrument_type"]),
-                decline_reason=DeclineReason(p["decline_reason"]),
-                issuer_code=p["issuer_code"],
-                failed_at=failed_at,
-            )
-        )
-    return failures
+
+def payment_by_id(session: Session, payment_id: str) -> Optional[Payment]:
+    """Reconstructs the single Payment a live caller already knows the id
+    of — e.g. an inbound customer reply naming which payment it's about
+    (execution/reply_webhook.py). Returns None if this payment_id was never
+    DIAGNOSED, or its event is missing a required field (same honesty as
+    recent_failures(): never a fabricated Payment)."""
+    event = (
+        session.query(EventRecord)
+        .filter_by(payment_id=payment_id, to_state=PaymentState.DIAGNOSED.value)
+        .order_by(EventRecord.id)
+        .first()
+    )
+    if event is None:
+        return None
+    return _payment_from_diagnosed_event(session, event)
 
 
 def _payment_ids_for_customer(session: Session, customer_id: str) -> List[str]:

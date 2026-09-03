@@ -394,6 +394,33 @@ def decide(
     None if STOP wins (every candidate was vetoed, or none beat STOP's
     implicit score of 0).
 
+    now IS load-bearing (external cold review, 2026-08-27 -- see
+    INCIDENTS.md): each candidate's natural action_time is still
+    payment.failed_at + candidate.offset (a category's own timing belief,
+    anchored to the failure that triggered it -- unrelated to when decide()
+    happens to be called), but the actual action_time used both for veto
+    checks and for the RETURNED offset is max(now, that natural time). On a
+    fresh diagnosis every existing caller passes now=payment.failed_at, and
+    every candidate offset is >= timedelta(0), so max() always resolves to
+    the natural time and this is byte-identical to the old behaviour --
+    zero change to the primary batch/harness/execution path. It only
+    diverges on a genuine RE-evaluation (now > payment.failed_at), which is
+    exactly llm.reply_handling.apply_reply_intent's PROMISE_TO_PAY path: if
+    the promised date is later than the category's natural offset would
+    have fired, the winning candidate now fires immediately at that later
+    now instead of silently repeating the original, already-stale offset --
+    and because action_time can land on a different day/hour, the
+    contact-hours and weekly-cap vetoes are now evaluated at the time the
+    contact would ACTUALLY happen, which can flip the decision to None (or
+    from None to an action) versus what the original diagnosis returned.
+    Before this fix, now was accepted as a parameter and never read, so a
+    promise-to-pay re-evaluation silently reproduced the original decision
+    regardless of what was promised -- see
+    tests/test_llm_reply_handling.py's
+    test_reevaluation_at_a_promised_date_genuinely_differs_from_the_original_diagnosis
+    and test_full_agent.py's
+    test_reevaluating_at_a_later_now_can_flip_a_contact_hours_veto.
+
     attempt_number (P1 #3, 2026-08-25 DECISIONS.md): feeds the ISSUER_DOWN
     jitter/circuit-breaker release schedule -- same reasoning as
     idempotency.make_idempotency_key's (payment_id, attempt_number) pair.
@@ -408,8 +435,9 @@ def decide(
 
     best: Optional[Candidate] = None
     best_score = 0.0  # STOP's score: zero cost, zero revenue
+    best_action_time: Optional[datetime] = None
     for candidate in candidates:
-        action_time = payment.failed_at + candidate.offset
+        action_time = max(now, payment.failed_at + candidate.offset)
         if _veto_reason(candidate, customer, action_time, tracker) is not None:
             continue
         cost = contact_cost_paise(candidate.action)
@@ -417,10 +445,11 @@ def decide(
         if expected_value > best_score:
             best_score = expected_value
             best = candidate
+            best_action_time = action_time
 
     if best is None:
         return None
-    return (best.offset, best.action)
+    return (best_action_time - now, best.action)
 
 
 def make_full_agent_policy(

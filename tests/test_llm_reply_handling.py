@@ -113,7 +113,16 @@ def test_opt_out_causes_full_agent_decide_to_veto_subsequent_actions():
     assert decision is None  # vetoed by explicit_opt_out
 
 
-def test_promise_to_pay_with_date_schedules_reevaluation_at_that_date():
+def test_promise_to_pay_with_date_schedules_reevaluation_at_a_genuinely_different_time_than_the_original_diagnosis():
+    """External cold review, 2026-08-27 (see INCIDENTS.md): decide() used
+    to accept `now` and never read it, so this re-evaluation silently
+    reproduced the exact same decision as the original diagnosis regardless
+    of what the customer promised -- a broken feature. Proven two ways:
+    (1) apply_reply_intent's outcome still matches an equivalent direct
+    decide() call (the plumbing wiring is correct), and (2) that outcome is
+    genuinely DIFFERENT from what decide() returns at the original failure
+    time -- the actual bug. Before the fix, (2) would have failed: both
+    calls returned the identical (offset, action)."""
     session = _session()
     tracker = ContactTracker()
     promised = (WINDOW_START + timedelta(days=5)).date()
@@ -121,12 +130,28 @@ def test_promise_to_pay_with_date_schedules_reevaluation_at_that_date():
 
     outcome = apply_reply_intent(session, classified, PAYMENT, PERSONA, tracker, [], [], WINDOW_START)
 
-    # Whatever comes back is exactly what decide() would return -- this
+    # (1) Whatever comes back is exactly what decide() would return -- this
     # function never executes anything itself, only calls the existing path.
-    direct_decision = decide(
-        PAYMENT, PERSONA, datetime.combine(promised, datetime.min.time()), tracker, [], []
-    )
+    # now.timetz(), not datetime.min.time() -- see reply_handling.py.
+    reeval_time = datetime.combine(promised, WINDOW_START.timetz())
+    direct_decision = decide(PAYMENT, PERSONA, reeval_time, tracker, [], [])
     assert outcome == direct_decision
+
+    # (2) And that decision genuinely differs from the original diagnosis at
+    # failure time -- if it didn't, `now` would still be dead code. The
+    # returned offset is relative to whichever `now` was actually passed
+    # (so callers can do due_at = now + offset either way) -- both offsets
+    # below are small because each action fires ~immediately relative to
+    # its OWN now, so the meaningful comparison is the resulting absolute
+    # due_at, not the raw offsets.
+    original_decision = decide(PAYMENT, PERSONA, PAYMENT.failed_at, tracker, [], [])
+    assert outcome != original_decision
+    assert outcome[0] == timedelta(0)  # promised date already past the natural +1h -> act now
+    assert original_decision[0] == timedelta(hours=1)  # INSUFFICIENT_FUNDS's natural candidate offset
+
+    original_due_at = PAYMENT.failed_at + original_decision[0]
+    reevaluated_due_at = reeval_time + outcome[0]
+    assert reevaluated_due_at - original_due_at >= timedelta(days=4)  # scheduled near the PROMISED date, not repeated
 
 
 def test_promise_to_pay_without_date_defaults_to_a_short_reevaluation_delay():

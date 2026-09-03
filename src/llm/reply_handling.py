@@ -62,7 +62,28 @@ def apply_reply_intent(
 
     if classified.intent == ReplyIntent.PROMISE_TO_PAY:
         if classified.promised_date is not None:
-            reeval_time = datetime.combine(classified.promised_date, datetime.min.time())
+            # now.timetz(), not datetime.min.time() (found while fixing
+            # decide()'s now to be genuinely load-bearing, 2026-08-27 -- see
+            # INCIDENTS.md), for two independent reasons:
+            #   1. datetime.min.time() is midnight with no tzinfo. decide()
+            #      now does max(now, payment.failed_at + offset), which
+            #      raises TypeError comparing a naive reeval_time against an
+            #      execution/-sourced aware payment.failed_at -- harmless
+            #      while decide() ignored `now`, not once it's compared.
+            #      now.timetz() carries the same tzinfo as `now` itself, so
+            #      reeval_time stays in whatever aware/naive domain the
+            #      caller is already using.
+            #   2. Midnight is virtually never inside a customer's declared
+            #      contact_hours, so ALWAYS re-evaluating at 00:00 on the
+            #      promised date would make full_agent.decide()'s
+            #      contact-hours veto fire on nearly every real
+            #      promise-to-pay reply, regardless of what was promised --
+            #      not a deliberate design choice, just untested until
+            #      `now` started mattering. Reusing now's hour keeps the
+            #      re-evaluation at the same time of day real outreach
+            #      already happens at, same as the no-date fallback below
+            #      already does via `now + timedelta(days=...)`.
+            reeval_time = datetime.combine(classified.promised_date, now.timetz())
         else:
             reeval_time = now + timedelta(days=DEFAULT_REEVALUATION_DELAY_DAYS)
         return decide(payment, customer, reeval_time, tracker, failure_log, outage_events)

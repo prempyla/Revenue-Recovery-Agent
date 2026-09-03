@@ -63,8 +63,12 @@ def test_contact_hours_veto_forces_stop_even_though_action_would_otherwise_score
     """A compliance rule that can be outscored isn't a compliance rule: a
     huge payment amount must NOT buy its way past the contact-hours veto."""
     persona = _persona(contact_hours=(9, 10))  # a narrow window
-    # AFA_3DS_DROPOFF's candidate fires at +30min; failed_at at midnight
-    # puts the action_time well outside (9,10).
+    # AFA_3DS_DROPOFF's candidate fires at +30min; failed_at defaults to
+    # DEFAULT_FAILED_AT (10am), so action_time = 10:30am -- outside the
+    # (9, 10) window's exclusive upper bound. (Stale-comment fix, external
+    # cold review, 2026-08-27: this used to say "failed_at at midnight",
+    # which was never what this test actually constructs -- the conclusion
+    # was right, the stated reason wasn't.)
     payment = _payment(DeclineReason.AFA_3DS_DROPOFF, amount_paise=5_000_000)  # huge amount
     decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
     assert decision is None  # vetoed, not scored around
@@ -85,7 +89,12 @@ def test_utc_action_time_outside_ist_window_numerically_is_still_permitted_once_
     assert not (9 <= utc_time.hour < 21)  # the bug's bare .hour read would reject this
     payment = _payment(DeclineReason.RISK_DECLINE, failed_at=utc_time)
 
-    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    # now=payment.failed_at (a fresh diagnosis, not a re-evaluation), same
+    # as every real caller -- not WINDOW_START, which is naive and would
+    # TypeError against this test's deliberately tz-aware failed_at now
+    # that decide() actually compares now against payment.failed_at
+    # (2026-08-27 fix, see INCIDENTS.md).
+    decision = decide(payment, persona, payment.failed_at, ContactTracker(), [], [])
 
     assert decision is not None
     assert decision[1].action_type == ActionType.ESCALATE_ALTERNATE_INSTRUMENT
@@ -106,7 +115,8 @@ def test_utc_action_time_inside_ist_window_numerically_is_correctly_vetoed():
     assert 9 <= utc_time.hour < 21  # the bug's bare .hour read would (wrongly) accept this
     payment = _payment(DeclineReason.RISK_DECLINE, failed_at=utc_time, amount_paise=5_000_000)
 
-    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    # now=payment.failed_at, same reasoning as the sibling test above.
+    decision = decide(payment, persona, payment.failed_at, ContactTracker(), [], [])
 
     assert decision is None  # vetoed: true IST hour is 21, outside the window
 
@@ -162,12 +172,17 @@ def test_issuer_down_holds_when_outage_detected_instead_of_retrying_into_it():
         for i, m in enumerate([10, 12, 14, 16, 18])
     ]
 
+    # now=payment.failed_at (a fresh diagnosis), not WINDOW_START -- now
+    # that decide() actually uses `now` (2026-08-27 fix, see INCIDENTS.md),
+    # passing an unrelated `now` earlier than failed_at would still resolve
+    # to the same offsets via max(), but failed_at is what every real
+    # caller actually passes and is the correct thing to assert against.
     with_detection = decide(
-        payment, persona, WINDOW_START, ContactTracker(), burst, [], detector_config=detector_cfg,
+        payment, persona, payment.failed_at, ContactTracker(), burst, [], detector_config=detector_cfg,
         disable_outage_detection=False,
     )
     ablated = decide(
-        payment, persona, WINDOW_START, ContactTracker(), burst, [], detector_config=detector_cfg,
+        payment, persona, payment.failed_at, ContactTracker(), burst, [], detector_config=detector_cfg,
         disable_outage_detection=True,
     )
 
@@ -183,7 +198,7 @@ def test_issuer_down_holds_when_outage_detected_instead_of_retrying_into_it():
 def test_issuer_down_no_outage_detected_uses_the_short_retry_offset():
     persona = _persona()
     payment = _payment(DeclineReason.ISSUER_DOWN, issuer_code="HDFC")
-    decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
+    decision = decide(payment, persona, payment.failed_at, ContactTracker(), [], [])
     assert decision is not None
     offset, action = decision
     assert offset == timedelta(minutes=20)
@@ -248,3 +263,66 @@ def test_tiny_payment_amount_can_make_stop_win_over_a_customer_facing_action():
     payment = _payment(DeclineReason.AFA_3DS_DROPOFF, amount_paise=1)
     decision = decide(payment, persona, WINDOW_START, ContactTracker(), [], [])
     assert decision is None
+
+
+# --- now is load-bearing (external cold review, 2026-08-27, see
+# INCIDENTS.md): before this fix, decide() accepted `now` but never read
+# it anywhere in its own body or in _candidates_for/_veto_reason, so a
+# genuine re-evaluation (llm.reply_handling.apply_reply_intent's
+# PROMISE_TO_PAY path calling decide() again at a later `now`) silently
+# reproduced the exact same (offset, action) as the original diagnosis,
+# regardless of what the customer actually promised. These two tests would
+# both have FAILED against the pre-fix decide(): the pre-fix function
+# always returned (candidate.offset, action) untouched by `now`, so calling
+# it twice with two different `now` values for the same payment/tracker
+# always produced two IDENTICAL results -- the opposite of what's asserted
+# below. ---
+
+
+def test_now_is_load_bearing_reevaluating_later_returns_a_different_offset():
+    """Same payment, same persona, same (empty) tracker -- only `now`
+    differs between the two calls. If `now` were dead code (the bug this
+    fixes), both offsets below would be identical."""
+    persona = _persona()  # contact_hours=(9, 21), wide enough not to veto
+    payment = _payment(DeclineReason.INSUFFICIENT_FUNDS)  # SEND_PAYMENT_LINK, +1h candidate offset
+
+    original = decide(payment, persona, payment.failed_at, ContactTracker(), [], [])
+    assert original is not None
+    original_offset, original_action = original
+    assert original_offset == timedelta(hours=1)  # the category's natural offset, unmodified
+
+    # Re-evaluate 5 days later -- e.g. a PROMISE_TO_PAY reply with that date.
+    # The natural +1h offset from the ORIGINAL failure has long since
+    # elapsed by the time we're actually re-deciding, so the genuinely
+    # correct action_time is `now` itself (act immediately at the promised
+    # moment), not a stale offset counted from a failure 5 days in the past.
+    reeval_now = payment.failed_at + timedelta(days=5)
+    reevaluated = decide(payment, persona, reeval_now, ContactTracker(), [], [])
+    assert reevaluated is not None
+    reevaluated_offset, reevaluated_action = reevaluated
+
+    assert reevaluated_offset != original_offset
+    assert reevaluated_offset == timedelta(0)  # act now -- the natural offset already passed
+    assert reevaluated_action.action_type == original_action.action_type  # same category, same action choice
+
+
+def test_reevaluating_at_a_later_now_can_flip_a_contact_hours_veto():
+    """The stronger claim: re-evaluating at a later `now` doesn't just
+    change the returned offset, it can change whether an action happens at
+    all, because the contact-hours veto is evaluated at the time the
+    contact would ACTUALLY occur -- action_time -- not at a stale offset
+    from the original failure."""
+    persona = _persona(contact_hours=(9, 10))  # a narrow window
+    payment = _payment(DeclineReason.INSUFFICIENT_FUNDS, failed_at=datetime(2026, 1, 1, 8, 0))
+    # Candidate offset is +1h -> natural action_time = 09:00, inside (9, 10).
+
+    original = decide(payment, persona, payment.failed_at, ContactTracker(), [], [])
+    assert original is not None
+    assert original[1].action_type == ActionType.SEND_PAYMENT_LINK
+
+    # Re-evaluate several days later, at 14:00 -- outside (9, 10). The
+    # pre-fix bug would have returned this SAME allowed decision, because
+    # it never looked at `now` (or the resulting action_time) at all.
+    reeval_now = datetime(2026, 1, 5, 14, 0)
+    reevaluated = decide(payment, persona, reeval_now, ContactTracker(), [], [])
+    assert reevaluated is None  # vetoed: 14:00 is outside the customer's (9, 10) window

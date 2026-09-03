@@ -1,4 +1,4 @@
-.PHONY: help install test demo crash-demo charts clean
+.PHONY: help install test demo reply-demo crash-demo charts clean
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -7,8 +7,9 @@ PIP := $(VENV)/bin/pip
 help:
 	@echo "Razorpay Revenue Recovery Agent -- available targets:"
 	@echo "  make install     create .venv and install dependencies"
-	@echo "  make test        run the full test suite (238+ tests)"
+	@echo "  make test        run the full test suite (245+ tests)"
 	@echo "  make demo        seeded end-to-end run through the real execution pipeline"
+	@echo "  make reply-demo  customer replies STOP -> live opt-out -> vetoes the next decide()"
 	@echo "  make crash-demo  kill -9 a worker mid-dispatch, restart it, reconcile the result"
 	@echo "  make charts      regenerate the three evaluation charts in docs/charts/"
 
@@ -25,6 +26,9 @@ test:
 
 demo:
 	$(PYTHON) scripts/demo_run.py
+
+reply-demo:
+	$(PYTHON) scripts/demo_reply.py
 
 crash-demo:
 	$(PYTHON) scripts/demo_crash_recovery.py

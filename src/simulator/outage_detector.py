@@ -5,11 +5,29 @@ A sliding-window count-threshold detector per issuer_code, with hysteresis
 threshold, instead of flapping on/off every time a single failure ages out
 of the window).
 
-Deliberately separate from the decision policy and NOT wired into
-full_agent or the harness yet — a standalone pure function, same discipline
-as ground_truth.success_probability() and the decide() function described in
-DECISIONS.md: no I/O, no direct API calls, no internal clock reads, no
-mutation. `now` and the observable failure_log are the only inputs.
+Deliberately separate from the decision policy — a standalone pure
+function, same discipline as ground_truth.success_probability() and the
+decide() function described in DECISIONS.md: no I/O, no direct API calls,
+no internal clock reads, no mutation. `now` and the observable failure_log
+are the only inputs.
+
+Stale-docstring fix, 2026-08-27 (external cold review, see INCIDENTS.md):
+this used to say "and NOT wired into full_agent or the harness yet",
+accurate when this file was first built standalone (2026-08-25,
+DECISIONS.md's "Systemic outage detector built standalone" entry) but false
+by the very next entry the same day ("full_agent gets a real data source"),
+when full_agent.py started importing and calling detect_systemic_event
+directly in its ISSUER_DOWN branch — the docstring was simply never updated
+after that. It IS wired in now: full_agent.py's `_candidates_for` calls
+detect_systemic_event (via circuit_breaker_state too, for the P1 #3 jitter/
+release logic) as its ISSUER_DOWN handling, and the eval harness's
+`_systemic_detector_metrics` (harness.py) reports its false-positive rate
+and detection lag from full_agent's actual runs. What's still true and
+unchanged: this module itself has no hardcoded threshold — config.py owns
+DETECTOR_COUNT_THRESHOLD (=6, chosen by the 3-seed sweep DECISIONS.md
+documents), full_agent.py reads it into DEFAULT_DETECTOR_CONFIG and passes
+it in as an explicit detector_config argument, keeping this file the same
+threshold-agnostic, swept-not-guessed detector it always was.
 
 Hysteresis without a stored .flagged flag: detect_systemic_event() stays
 pure by reconstructing whether the issuer is still "in cooldown" from the
